@@ -60,6 +60,10 @@ def test_prose_with_urls_or_the_word_from_is_not_treated_as_code() -> None:
     assert clean_page(text, CleanupOptions()) == "Read before learning from the table."
 
 
+def test_cleanup_skips_author_year_style_bracket_citations() -> None:
+    assert clean_page("See the classic result [HP90] and follow-up [K62].", CleanupOptions()) == "See the classic result and follow-up."
+
+
 def test_repeated_code_notice_is_spoken_once_per_page() -> None:
     text = "prompt> gcc -o app app.c\nThe program now runs.\nprompt> ./app"
     cleaned = clean_page(text, CleanupOptions(code="explain"))

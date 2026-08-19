@@ -12,13 +12,14 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import numpy as np
 
 from .backends.base import TTSBackend
 from .models import CleanupOptions, RenderOptions, ResourceSettings
 from .pdf import ExtractedPage
+from .progress import ProgressEvent
 from .text import apply_pronunciations, chunk_text, clean_page, repeated_margin_lines
 
 _STATE_VERSION = 2
@@ -186,6 +187,8 @@ def render(
     cleanup: CleanupOptions,
     options: RenderOptions,
     book_metadata: dict[str, object] | None = None,
+    *,
+    progress: Callable[[ProgressEvent], None] | None = None,
 ) -> RenderReport:
     """Render selected pages with bounded CPU preparation and durable resume."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -198,13 +201,15 @@ def render(
     started = time.perf_counter()
     synthesized = 0
     total_audio = 0.0
+    generated_audio = 0.0
     chunks_total = 0
 
     # The producer is bounded by `prefetch`: while MLX synthesizes the current
     # chunk, cleanup workers prepare the next pages without retaining a book's
     # worth of cleaned text in memory.
-    for page, cleaned in _cleaned_pages(extracted_pages, cleanup, margins, resources):
-        for text in chunk_text(cleaned, resources.chunk_chars):
+    for page_index, (page, cleaned) in enumerate(_cleaned_pages(extracted_pages, cleanup, margins, resources), start=1):
+        texts = list(chunk_text(cleaned, resources.chunk_chars))
+        for text_index, text in enumerate(texts, start=1):
             chunks_total += 1
             spoken_text = apply_pronunciations(text, options.pronunciations)
             text_hash = _text_hash(page, spoken_text, options)
@@ -212,18 +217,39 @@ def render(
             if options.resume and checkpoint is not None:
                 _verify_checkpoint(chunks_total, checkpoint, page, text_hash)
                 total_audio += checkpoint.duration_seconds
+                _emit_progress(
+                    progress,
+                    "resuming narration",
+                    page_index - 1 + text_index / len(texts),
+                    len(extracted_pages),
+                    chunks_total,
+                    generated_audio,
+                    started,
+                    f"page {page}, chunk {chunks_total}",
+                )
                 continue
 
             result = backend.synthesize(spoken_text, voice=options.voice, speed=options.speed, sample_rate=options.sample_rate)
-            audio = _with_pause(result.audio, result.sample_rate, options.chunk_pause_ms)
-            duration = len(audio) / result.sample_rate
+            audio = _with_pause(_resample_audio(result.audio, result.sample_rate, options.sample_rate), options.sample_rate, options.chunk_pause_ms)
+            duration = len(audio) / options.sample_rate
             end_bytes = store.append_audio(audio) if audio.size else _pcm_size(store.pcm_path)
             store.append_checkpoint(
                 chunks_total,
                 _Checkpoint(page, text_hash, duration, end_bytes, empty=result.audio.size == 0),
             )
             total_audio += duration
+            generated_audio += duration
             synthesized += 1
+            _emit_progress(
+                progress,
+                "synthesizing",
+                page_index - 1 + text_index / len(texts),
+                len(extracted_pages),
+                chunks_total,
+                generated_audio,
+                started,
+                f"page {page}, chunk {chunks_total}",
+            )
 
     if not chunks_total:
         raise ValueError("no readable text remained after extraction and cleanup")
@@ -232,6 +258,16 @@ def render(
 
     output = output_dir / f"{label}.{options.audio_format}"
     if not (options.resume and store.completed and output.exists() and synthesized == 0):
+        _emit_progress(
+            progress,
+            "encoding",
+            len(extracted_pages),
+            len(extracted_pages),
+            chunks_total,
+            generated_audio,
+            started,
+            output.name,
+        )
         _encode(
             store.pcm_path,
             output,
@@ -243,6 +279,16 @@ def render(
         )
         store.mark_complete(output)
     elapsed = time.perf_counter() - started
+    _emit_progress(
+        progress,
+        "complete",
+        len(extracted_pages),
+        len(extracted_pages),
+        chunks_total,
+        generated_audio,
+        started,
+        output.name,
+    )
     return RenderReport(
         output, chunks_total, synthesized, total_audio, elapsed,
         layout_summary["code_lines"], layout_summary["schema_lines"], layout_summary["table_lines"],
@@ -259,6 +305,9 @@ def render_script(
     book_metadata: dict[str, object] | None = None,
     *,
     turn_pause_ms: int = 350,
+    script_kind: str = "podcast",
+    script_metadata: dict[str, object] | None = None,
+    progress: Callable[[ProgressEvent], None] | None = None,
 ) -> RenderReport:
     """Render a bounded multi-voice script into one resumable audio artifact.
 
@@ -285,18 +334,20 @@ def render_script(
             book_metadata,
             layout_summary,
             {
-                "kind": "podcast",
+                "kind": script_kind,
                 "turns": len(lines),
                 "voices": sorted({line.voice for line in lines}),
                 "turn_pause_ms": turn_pause_ms,
+                **(script_metadata or {}),
             },
         )
     started = time.perf_counter()
     synthesized = 0
     total_audio = 0.0
+    generated_audio = 0.0
     chunks_total = 0
 
-    for line in lines:
+    for line_index, line in enumerate(lines, start=1):
         parts = list(chunk_text(line.text, resources.chunk_chars))
         if not parts:
             continue
@@ -310,6 +361,16 @@ def render_script(
             if options.resume and checkpoint is not None:
                 _verify_checkpoint(chunks_total, checkpoint, line.number, text_hash)
                 total_audio += checkpoint.duration_seconds
+                _emit_progress(
+                    progress,
+                    "resuming narration",
+                    line_index - 1 + (part_index + 1) / len(parts),
+                    len(lines),
+                    chunks_total,
+                    generated_audio,
+                    started,
+                    f"turn {line.number}, chunk {chunks_total}",
+                )
                 continue
 
             result = backend.synthesize(
@@ -318,15 +379,26 @@ def render_script(
                 speed=options.speed,
                 sample_rate=options.sample_rate,
             )
-            audio = _with_pause(result.audio, result.sample_rate, pause_ms)
-            duration = len(audio) / result.sample_rate
+            audio = _with_pause(_resample_audio(result.audio, result.sample_rate, options.sample_rate), options.sample_rate, pause_ms)
+            duration = len(audio) / options.sample_rate
             end_bytes = store.append_audio(audio) if audio.size else _pcm_size(store.pcm_path)
             store.append_checkpoint(
                 chunks_total,
                 _Checkpoint(line.number, text_hash, duration, end_bytes, empty=result.audio.size == 0),
             )
             total_audio += duration
+            generated_audio += duration
             synthesized += 1
+            _emit_progress(
+                progress,
+                "synthesizing",
+                line_index - 1 + (part_index + 1) / len(parts),
+                len(lines),
+                chunks_total,
+                generated_audio,
+                started,
+                f"turn {line.number}, chunk {chunks_total}",
+            )
 
     if not chunks_total:
         raise ValueError("podcast script has no readable turns")
@@ -335,6 +407,7 @@ def render_script(
 
     output = output_dir / f"{label}.{options.audio_format}"
     if not (options.resume and store.completed and output.exists() and synthesized == 0):
+        _emit_progress(progress, "encoding", len(lines), len(lines), chunks_total, generated_audio, started, output.name)
         _encode(
             store.pcm_path,
             output,
@@ -346,7 +419,32 @@ def render_script(
         )
         store.mark_complete(output)
     elapsed = time.perf_counter() - started
+    _emit_progress(progress, "complete", len(lines), len(lines), chunks_total, generated_audio, started, output.name)
     return RenderReport(output, chunks_total, synthesized, total_audio, elapsed, 0, 0, 0)
+
+
+def _emit_progress(
+    callback: Callable[[ProgressEvent], None] | None,
+    phase: str,
+    completed: float,
+    total: float,
+    units_completed: int,
+    audio_seconds: float,
+    started: float,
+    detail: str,
+) -> None:
+    if callback is not None:
+        callback(
+            ProgressEvent(
+                phase,
+                completed,
+                total,
+                units_completed,
+                audio_seconds,
+                time.perf_counter() - started,
+                detail,
+            )
+        )
 
 
 def _cleaned_pages(
@@ -393,6 +491,24 @@ def _verify_checkpoint(index: int, checkpoint: _Checkpoint, page: int, text_hash
 def _as_pcm16(audio: np.ndarray) -> bytes:
     samples = np.asarray(audio, dtype=np.float32)
     return np.rint(np.clip(samples, -1.0, 1.0) * 32767).astype("<i2", copy=False).tobytes()
+
+
+def _resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """Keep the single PCM journal at its declared output sample rate.
+
+    Kokoro already returns the requested rate. Piper's Persian voices are
+    normally 22.05 kHz, so this small bounded interpolation keeps a mixed
+    backend from producing a journal that ffmpeg would interpret at the wrong
+    speed. It is not an artificial quality enhancer.
+    """
+    samples = np.asarray(audio, dtype=np.float32)
+    if source_rate == target_rate or samples.size == 0:
+        return samples
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("audio sample rates must be positive")
+    count = max(1, round(len(samples) * target_rate / source_rate))
+    positions = np.linspace(0, len(samples) - 1, count, dtype=np.float64)
+    return np.interp(positions, np.arange(len(samples)), samples).astype(np.float32)
 
 
 def _with_pause(audio: np.ndarray, sample_rate: int, pause_ms: int) -> np.ndarray:

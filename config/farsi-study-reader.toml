@@ -1,0 +1,70 @@
+# Fully local English-to-Persian study reading.
+#
+# Install the two optional local runtimes once, then download the selected
+# Farsi Piper voice:
+#   uv sync --extra farsi
+#   uv run local-tts setup-farsi --voice fa_IR-ganji_adabi-medium
+
+[reader]
+# A slightly slower rate makes the small Piper baseline less rushed for
+# technical Persian narration. Piper's source voice is 22.05 kHz; local-tts
+# converts its PCM stream to this output rate only for container consistency.
+speed = 1.2
+sample_rate = 24000
+chunk_pause_ms = 100
+
+[translation]
+target = "fa"
+# The dedicated NLLB translator is the faithful default for PDF study text.
+# It is fully released before Piper narration begins, keeping their RAM use
+# separate. To use a glossary-aware Qwen pass instead, set backend = "qwen"
+# and model = "mlx-community/Qwen3-4B-Instruct-2507-4bit".
+backend = "nllb"
+model = "facebook/nllb-200-distilled-600M"
+chunk_chars = 1200
+max_output_tokens = 1024
+# The adabi voice is a good first audition for technical/literary reading.
+# Try fa_IR-gyro-medium or fa_IR-ganji-medium too; each must be downloaded
+# with `setup-farsi` before selection.
+voice = "fa_IR-ganji_adabi-medium"
+# Explicitly lower Piper's stochastic variation for a steadier study-reader
+# delivery. This can smooth cadence, but cannot turn a low-resource voice into
+# a naturally native accent.
+noise_scale = 0.45
+noise_w_scale = 0.65
+
+[translation.protect]
+# These exact terms stay in their original source spelling; protected terms
+# always override [translation.glossary]. Add product names, people, libraries,
+# commands, and identifiers from the book here before rendering.
+"operating system" = true
+"operating systems" = true
+"kernel" = true
+"process" = true
+"thread" = true
+"PDF" = true
+"Linux" = true
+
+# To protect book-specific names, add the exact spelling instead of a Persian
+# phonetic substitute. For example: "Hennessy" = true
+
+# Optional: terms that should intentionally use a Persian translation. Do not
+# repeat a protected key in this table.
+# [translation.glossary]
+# "throughput" = "توان عملیاتی"
+
+[cleanup]
+code = "explain"
+schemas = "explain"
+tables = "explain"
+urls = "skip"
+citations = "skip"
+footnotes = "skip"
+headers_footers = true
+
+[resources]
+profile = "balanced"
+
+[output]
+format = "m4b"
+directory = "output"

@@ -10,9 +10,12 @@ from typing import Mapping
 from .models import CleanupOptions
 
 _URL = re.compile(r"(?:\b(?:visit|see|available\s+at)\s+)?(?:https?://\S+|www\.\S+)", re.IGNORECASE)
-_CITATION = re.compile(r"\[(?:\d+(?:\s*[,;-]\s*\d+)*)\]|\([^)]*\b(?:19|20)\d{2}[a-z]?[^)]*\)")
+_CITATION = re.compile(
+    r"\[(?:\d+(?:\s*[,;-]\s*\d+)*|[A-Za-z][A-Za-z-]*\d{1,4}[a-z]?)\]|"
+    r"\([^)]*\b(?:19|20)\d{2}[a-z]?[^)]*\)"
+)
 _FOOTNOTE = re.compile(r"^\s*(?:\d+|[*†‡])\s+.+$")
-_PAGE_NUMBER = re.compile(r"^\s*(?:page\s+)?\d+\s*$", re.IGNORECASE)
+_PAGE_NUMBER = re.compile(r"^\s*(?:page\s+)?(?:\d+|[ivxlcdm]{2,})\s*$", re.IGNORECASE)
 _SCHEMA = re.compile(
     r"(?:\b(?:CREATE\s+TABLE|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX)\b|^\s*(?:PRIMARY|FOREIGN)\s+KEY\s*\()",
     re.IGNORECASE,
@@ -90,6 +93,7 @@ def clean_page(
         result = _URL.sub("", result)
     if options.citations == "skip":
         result = _CITATION.sub("", result)
+    result = re.sub(r"\s+([,.;:!?])", r"\1", result)
     return re.sub(r"\s+", " ", result).strip()
 
 

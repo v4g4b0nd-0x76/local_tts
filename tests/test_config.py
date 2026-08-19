@@ -73,6 +73,49 @@ def test_explicit_cli_reader_value_beats_config(tmp_path: Path) -> None:
     assert args.speed == 0.96
 
 
+def test_book_config_applies_persian_translation_policy_and_glossary(tmp_path: Path) -> None:
+    config = tmp_path / "farsi.toml"
+    config.write_text(
+        """[translation]
+target = "fa"
+backend = "qwen"
+model = "local/qwen"
+chunk_chars = 1100
+max_output_tokens = 900
+voice = "fa_IR-gyro-medium"
+voice_dir = "piper-voices"
+noise_scale = 0.4
+noise_w_scale = 0.6
+
+[translation.glossary]
+"operating system" = "سیستم عامل"
+"kernel" = "هسته"
+
+[translation.protect]
+"Hennessy" = true
+"kernel" = true
+
+[translation.transliteration]
+"Hennessy" = "هنسی"
+"""
+    )
+    args = _parser().parse_args(["book", "book.pdf", "--config", str(config)])
+    _apply_book_config(args)
+
+    assert args.translate == "fa"
+    assert args.translation_backend == "qwen"
+    assert args.translation_model == "local/qwen"
+    assert args.translation_chunk_chars == 1100
+    assert args.translation_max_tokens == 900
+    assert args.farsi_voice == "fa_IR-gyro-medium"
+    assert args.farsi_model_dir == Path("piper-voices")
+    assert args.farsi_noise_scale == 0.4
+    assert args.farsi_noise_w_scale == 0.6
+    assert args.translation_glossary == (("kernel", "هسته"), ("operating system", "سیستم عامل"))
+    assert args.translation_protected_terms == ("Hennessy", "kernel")
+    assert args.translation_transliterations == (("Hennessy", "هنسی"),)
+
+
 def test_misspelled_summerize_alias_is_supported() -> None:
     args = _parser().parse_args(["book", "book.pdf", "--summerize"])
     assert args.summarize is True

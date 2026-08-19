@@ -28,14 +28,28 @@ Use this guidance for work on `local-tts`.
    downloading model weights.
 9. Two-voice study podcasts reuse that bounded context but must validate a
    strict alternating `host`/`explainer` script before narration. Keep the
-   model phase separate from Kokoro, checkpoint each voiced turn, and record
-   both voice IDs and generation metrics. Prefer the verified American pair
-   `af_bella` and `am_michael` in the sample configuration.
-10. The optional browser API must remain loopback-first and serialize model
+    model phase separate from Kokoro, checkpoint each voiced turn, and record
+    both voice IDs and generation metrics. Prefer the verified American pair
+    `af_bella` and `am_michael` in the sample configuration.
+10. Persian translation is local NLLB (default) or Qwen generation followed by
+    a native Persian Piper voice. Persist one source-to-translation record per
+    durable chunk, normalize Arabic-form letters to Persian `ی`/`ک`, and write
+    a reviewable sidecar. Protect NLLB glossary terms with copied placeholders
+    and unload the translator before Piper. Protected technical terms and names
+    must retain their source spelling, take precedence over a glossary or
+    transliteration replacement, and never be altered by English Kokoro
+    pronunciation rewrites. A Farsi voice intentionally gives Arabic-script
+    loanwords Persian pronunciation, not native Arabic recitation or natural
+    English code-switching.
+11. Long-running CLI work emits optional progress callbacks. The terminal
+    renderer writes them to stderr so JSON stdout stays parseable; show page or
+    segment throughput for non-audio work and generated-audio seconds per
+    wall-clock second for narration and benchmarks.
+12. The optional browser API must remain loopback-first and serialize model
     access. Keep streamed audio chunk metadata tied to exact, unmodified source
     offsets so PDF.js can highlight spoken text while pronunciation rewrites
     apply only to the synthesized copy.
-11. The `read` command must serve only its explicit PDF input and local PDF.js
+13. The `read` command must serve only its explicit PDF input and local PDF.js
     assets after `setup-viewer`; it should open the browser by default and show
     both document-load and requested-speech progress in the viewer. Preserve
     the bounded high-detail canvas renderer and serve any opted-in custom theme

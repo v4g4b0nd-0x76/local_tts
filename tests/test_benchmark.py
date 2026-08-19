@@ -16,9 +16,15 @@ class FakeBackend:
 
 
 def test_benchmark_probes_unique_chunk_sizes_and_recommends_one() -> None:
+    events = []
     reports, recommended = benchmark_candidates(
-        FakeBackend(), ResourceSettings(cpu_threads=1, prefetch=1, chunk_chars=900, memory_gb=100), runs=1
+        FakeBackend(),
+        ResourceSettings(cpu_threads=1, prefetch=1, chunk_chars=900, memory_gb=100),
+        runs=1,
+        progress=events.append,
     )
     assert {report.chunk_chars for report in reports} == {500, 900, 1400}
     assert recommended in reports
     assert all(report.chunks_per_run > 1 for report in reports)
+    assert events[-1].completed == events[-1].total == 3
+    assert events[-1].audio_seconds > 0

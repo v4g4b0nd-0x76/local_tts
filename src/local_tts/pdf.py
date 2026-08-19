@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 from pypdf import PdfReader
 
@@ -53,8 +53,20 @@ class PDFDocument:
     def inspect(self) -> tuple[int, list[Chapter]]:
         return _inspect_reader(self.reader)
 
-    def extract_pages(self, pages: list[int]) -> list[ExtractedPage]:
-        return [self._extract_page(number) for number in pages]
+    def extract_pages(
+        self,
+        pages: list[int],
+        *,
+        progress: Callable[[int, int, int], None] | None = None,
+    ) -> list[ExtractedPage]:
+        """Extract one selected range while exposing page-granular I/O progress."""
+        extracted: list[ExtractedPage] = []
+        total = len(pages)
+        for index, number in enumerate(pages, start=1):
+            extracted.append(self._extract_page(number))
+            if progress is not None:
+                progress(number, index, total)
+        return extracted
 
     def metadata(self) -> dict[str, object]:
         """Read embedded document metadata without requiring external tools."""
@@ -101,7 +113,11 @@ class PDFDocument:
             schema_lines=sum(kind == "schema" for kind in technical_lines.values()),
             table_lines=sum(kind == "table" for kind in technical_lines.values()),
         )
-        return ExtractedPage(number, plain, technical_lines, stats)
+        # The ordinary extractor often emits visual character spacing as broken
+        # English words (for example ``hono r``); layout mode is usually much
+        # cleaner for book prose. Select it only when it retained comparable
+        # content and measurably reduces those split-word artifacts.
+        return ExtractedPage(number, _preferred_reading_text(plain, layout), technical_lines, stats)
 
     def close(self) -> None:
         self._stream.close()
@@ -238,6 +254,29 @@ def _classify_layout_lines(layout: str) -> dict[str, str]:
 
 def _normalise_layout_line(line: str) -> str:
     return " ".join(line.split())
+
+
+_SPLIT_WORD = re.compile(r"\b[A-Za-z]{1,16}\s+[a-z]\b")
+
+
+def _preferred_reading_text(plain: str, layout: str) -> str:
+    """Prefer layout extraction only when it improves broken proportional text."""
+    if not layout.strip():
+        return plain
+    plain_compact = re.sub(r"\s+", "", plain)
+    layout_compact = re.sub(r"\s+", "", layout)
+    # Layout mode can omit floating text in some valid PDFs. It must retain the
+    # great majority of the ordinary extract before it is permitted to replace
+    # it as the narration/translation source.
+    if plain_compact and len(layout_compact) < len(plain_compact) * 0.8:
+        return plain
+    if len(_SPLIT_WORD.findall(layout)) >= len(_SPLIT_WORD.findall(plain)):
+        return plain
+    # PDF layout extraction frequently applies the same horizontal margin to
+    # every prose line. The cleaner's indentation heuristic would mistake that
+    # margin for a code block, so remove only outer line padding. Layout-derived
+    # code/schema classifications still preserve genuine technical blocks.
+    return "\n".join(_normalise_layout_line(line) for line in layout.splitlines())
 
 
 def _looks_like_code(line: str) -> bool:

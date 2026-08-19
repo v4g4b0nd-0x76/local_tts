@@ -7,7 +7,7 @@ import numpy as np
 
 from local_tts.backends.base import TTSResult
 from local_tts.models import CleanupOptions, RenderOptions, ResourceSettings
-from local_tts.render import ScriptLine, render, render_script
+from local_tts.render import ScriptLine, _resample_audio, render, render_script
 
 
 class FakeBackend:
@@ -102,6 +102,33 @@ def test_render_applies_pronunciation_rewrites_before_synthesis(tmp_path: Path) 
         RenderOptions(audio_format="mp3", pronunciations=(("prob lem", "problum"),)),
     )
     assert backend.texts == ["A problum can be solved."]
+
+
+def test_render_emits_live_progress_with_audio_rate_inputs(tmp_path: Path) -> None:
+    backend = FakeBackend()
+    events = []
+    report = render(
+        [(1, "A short sentence for the renderer.")],
+        tmp_path,
+        "progress",
+        backend,
+        ResourceSettings(cpu_threads=1, prefetch=1, chunk_chars=100, memory_gb=1),
+        CleanupOptions(),
+        RenderOptions(audio_format="mp3"),
+        progress=events.append,
+    )
+
+    assert report.output.exists()
+    assert any(event.phase == "synthesizing" and event.audio_seconds > 0 for event in events)
+    assert events[-1].phase == "complete"
+    assert events[-1].completed == events[-1].total == 1
+
+
+def test_resample_keeps_pcm_duration_correct_for_piper_rate() -> None:
+    original = np.linspace(-0.5, 0.5, 22_050, dtype=np.float32)
+    converted = _resample_audio(original, 22_050, 24_000)
+    assert len(converted) == 24_000
+    assert converted.dtype == np.float32
 
 
 def test_podcast_script_alternates_voices_and_resumes(tmp_path: Path) -> None:

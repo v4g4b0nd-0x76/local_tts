@@ -7,15 +7,20 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
-from .backends import KokoroMLXBackend
+from .backends import KokoroMLXBackend, NLLBPersianTranslator, PiperFarsiBackend
+from .backends.piper_farsi import DEFAULT_FARSI_VOICE, default_farsi_model_dir, piper_voice_path
 from .benchmark import benchmark_candidates
 from .config import config_value, load_config
 from .models import CleanupOptions, PROFILES, ProfileName, RenderOptions, ResourceSettings
 from .pdf import PDFDocument, chapter_pages, page_range
+from .progress import ProgressEvent, TerminalProgress
 from .render import ScriptLine, render, render_script
 from .summarize import (
+    DEFAULT_SUMMARY_MODEL,
     MLXSummaryBackend,
     PodcastOptions,
     SummaryOptions,
@@ -23,6 +28,7 @@ from .summarize import (
     write_podcast,
     write_summary,
 )
+from .translation import DEFAULT_NLLB_MODEL, DEFAULT_TRANSLATION_BACKEND, TranslationOptions, translate_pages_to_persian
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,6 +41,9 @@ def _parser() -> argparse.ArgumentParser:
     _add_serve_args(serve)
     setup_viewer = subparsers.add_parser("setup-viewer", help="install the one-time local PDF.js reader assets")
     setup_viewer.add_argument("--force", action="store_true", help="refresh the local PDF.js installation")
+    setup_farsi = subparsers.add_parser("setup-farsi", help="download one local Persian Piper voice")
+    setup_farsi.add_argument("--voice", default=DEFAULT_FARSI_VOICE, help="Piper voice id, e.g. fa_IR-ganji_adabi-medium")
+    setup_farsi.add_argument("--model-dir", type=Path, default=default_farsi_model_dir(), help="local directory for Piper voice files")
     reader = subparsers.add_parser("read", help="open one PDF in the local PDF.js reader with speech controls")
     _add_reader_args(reader)
     book = subparsers.add_parser("book", help="render a PDF")
@@ -77,6 +86,15 @@ def _add_book_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--podcast-max-tokens", type=int, help="maximum tokens in the generated dialogue script")
     parser.add_argument("--podcast-max-turns", type=int, help="maximum alternating host/explainer turns (2-24)")
     parser.add_argument("--podcast-turn-pause-ms", type=int, help="silence after each host/explainer turn")
+    parser.add_argument("--translate", choices=["fa"], help="translate the selected PDF text to Persian before narration")
+    parser.add_argument("--translation-backend", choices=["nllb", "qwen"], help="local translator: NLLB (literal default) or Qwen (glossary-aware)")
+    parser.add_argument("--translation-model", help="local model used by the selected translation backend")
+    parser.add_argument("--translation-chunk-chars", type=int, help="maximum English characters in one translation request")
+    parser.add_argument("--translation-max-tokens", type=int, help="maximum Persian tokens per translation request")
+    parser.add_argument("--farsi-voice", help="installed Piper Persian voice id")
+    parser.add_argument("--farsi-model-dir", type=Path, help="local Piper voice directory")
+    parser.add_argument("--farsi-noise-scale", type=float, help="Piper variation (lower is steadier; 0-2)")
+    parser.add_argument("--farsi-noise-w-scale", type=float, help="Piper duration variation (lower is steadier; 0-2)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--format", choices=["m4a", "m4b", "mp3"])
@@ -159,6 +177,42 @@ def _apply_book_config(args: argparse.Namespace) -> None:
     assign("podcast_max_tokens", "podcast", "max_output_tokens", 640)
     assign("podcast_max_turns", "podcast", "max_turns", 8)
     assign("podcast_turn_pause_ms", "podcast", "turn_pause_ms", 350)
+    assign("translate", "translation", "target", None)
+    assign("translation_backend", "translation", "backend", DEFAULT_TRANSLATION_BACKEND)
+    if args.translation_backend not in {"nllb", "qwen"}:
+        raise ValueError("translation backend must be nllb or qwen")
+    assign(
+        "translation_model",
+        "translation",
+        "model",
+        DEFAULT_NLLB_MODEL if args.translation_backend == "nllb" else DEFAULT_SUMMARY_MODEL,
+    )
+    assign("translation_chunk_chars", "translation", "chunk_chars", 1_200)
+    assign("translation_max_tokens", "translation", "max_output_tokens", 1_024)
+    assign("farsi_voice", "translation", "voice", DEFAULT_FARSI_VOICE)
+    assign("farsi_model_dir", "translation", "voice_dir", default_farsi_model_dir())
+    assign("farsi_noise_scale", "translation", "noise_scale", 0.45)
+    assign("farsi_noise_w_scale", "translation", "noise_w_scale", 0.65)
+    if isinstance(args.farsi_model_dir, str):
+        args.farsi_model_dir = Path(args.farsi_model_dir)
+    glossary = config.get("translation", {}).get("glossary", {})
+    if not isinstance(glossary, dict) or any(
+        not isinstance(source, str) or not isinstance(target, str) for source, target in glossary.items()
+    ):
+        raise ValueError("[translation.glossary] must map source terms to Persian terms")
+    args.translation_glossary = tuple(sorted((source, target) for source, target in glossary.items()))
+    protected_terms = config.get("translation", {}).get("protect", {})
+    if not isinstance(protected_terms, dict) or any(
+        not isinstance(term, str) or enabled is not True for term, enabled in protected_terms.items()
+    ):
+        raise ValueError("[translation.protect] must map each source term or name to true")
+    args.translation_protected_terms = tuple(sorted(protected_terms))
+    transliterations = config.get("translation", {}).get("transliteration", {})
+    if not isinstance(transliterations, dict) or any(
+        not isinstance(source, str) or not isinstance(target, str) for source, target in transliterations.items()
+    ):
+        raise ValueError("[translation.transliteration] must map Latin names to Persian spellings")
+    args.translation_transliterations = tuple(sorted((source, target) for source, target in transliterations.items()))
     assign("output_dir", "output", "directory", Path("output"))
     if isinstance(args.output_dir, str):
         args.output_dir = Path(args.output_dir)
@@ -188,6 +242,21 @@ def _apply_book_config(args: argparse.Namespace) -> None:
         raise ValueError("podcast max turns must be between 2 and 24")
     if not 0 <= args.podcast_turn_pause_ms <= 4_000:
         raise ValueError("podcast turn_pause_ms must be between 0 and 4000")
+    if args.translate is not None and args.translate != "fa":
+        raise ValueError("only Persian translation is available in v1")
+    if args.translate:
+        if args.summarize or args.podcast:
+            raise ValueError("--translate cannot yet be combined with --summarize or --podcast")
+        if not 200 <= args.translation_chunk_chars <= 3_000:
+            raise ValueError("translation chunk size must be between 200 and 3000 characters")
+    if not 64 <= args.translation_max_tokens <= 2_048:
+        raise ValueError("translation max output tokens must be between 64 and 2048")
+    if not 0 <= args.farsi_noise_scale <= 2:
+        raise ValueError("Farsi noise scale must be between 0 and 2")
+    if not 0 <= args.farsi_noise_w_scale <= 2:
+        raise ValueError("Farsi duration noise scale must be between 0 and 2")
+    if not args.farsi_voice.strip():
+        raise ValueError("Farsi voice must be non-empty")
     args.pronunciations = _pronunciations(config)
 
 
@@ -336,12 +405,50 @@ def _run_book(args: argparse.Namespace) -> int:
             )
         # Keep selected text in memory once. This is small compared with model
         # weights and lets summary generation and rendering share extraction.
-        job_pages = [(pages, label, document.extract_pages(pages)) for pages, label in jobs]
+        # The callback is intentionally inside PDFDocument's single-reader
+        # extraction loop, avoiding a second parse merely to show progress.
+        pages_total = sum(len(pages) for pages, _ in jobs)
+        pages_done = 0
+        extraction_started = time.perf_counter()
+        extraction_progress = TerminalProgress("PDF")
+        job_pages = []
+        for pages, label in jobs:
+            def on_page(page: int, within_job: int, _job_total: int) -> None:
+                extraction_progress.update(
+                    ProgressEvent(
+                        "extracting",
+                        pages_done + within_job,
+                        pages_total,
+                        pages_done + within_job,
+                        elapsed_seconds=time.perf_counter() - extraction_started,
+                        detail=f"page {page} ({label})",
+                    )
+                )
+
+            extracted = document.extract_pages(pages, progress=on_page)
+            pages_done += len(pages)
+            job_pages.append((pages, label, extracted))
+        extraction_progress.finish(
+            ProgressEvent(
+                "extracted",
+                pages_total,
+                pages_total,
+                pages_total,
+                elapsed_seconds=time.perf_counter() - extraction_started,
+                detail=f"{pages_total} pages ready",
+            )
+        )
+        if args.translate:
+            return _run_farsi_translation(args, job_pages, cleanup, resources, book_metadata)
         summaries = {}
         podcasts = {}
         if args.summarize or args.podcast:
             summary_backend = MLXSummaryBackend(summary_options)
             summary_backend.configure(resources)
+            analysis_total = len(job_pages) * int(args.summarize) + len(job_pages) * int(args.podcast)
+            analysis_done = 0
+            analysis_started = time.perf_counter()
+            analysis_progress = TerminalProgress("Local analysis")
             try:
                 for pages, label, extracted in job_pages:
                     context = build_summary_context(document, extracted, chapters, cleanup, summary_options)
@@ -349,6 +456,17 @@ def _run_book(args: argparse.Namespace) -> int:
                         result = summary_backend.summarize(context)
                         markdown, details = write_summary(args.output_dir, label, context, result)
                         summaries[label] = (result, markdown, details)
+                        analysis_done += 1
+                        analysis_progress.update(
+                            ProgressEvent(
+                                "writing conclusion",
+                                analysis_done,
+                                analysis_total,
+                                analysis_done,
+                                elapsed_seconds=time.perf_counter() - analysis_started,
+                                detail=label,
+                            )
+                        )
                     if args.podcast:
                         result = summary_backend.podcast(context, podcast_options)
                         markdown, details = write_podcast(
@@ -360,9 +478,21 @@ def _run_book(args: argparse.Namespace) -> int:
                             explainer_voice=args.podcast_explainer_voice,
                         )
                         podcasts[label] = (result, markdown, details)
+                        analysis_done += 1
+                        analysis_progress.update(
+                            ProgressEvent(
+                                "writing podcast",
+                                analysis_done,
+                                analysis_total,
+                                analysis_done,
+                                elapsed_seconds=time.perf_counter() - analysis_started,
+                                detail=label,
+                            )
+                        )
             finally:
                 # The LLM and Kokoro intentionally never stay loaded together.
                 summary_backend.close()
+                analysis_progress.finish()
         backend = KokoroMLXBackend()
         backend.configure(resources)
         try:
@@ -370,7 +500,19 @@ def _run_book(args: argparse.Namespace) -> int:
             # cross-reference table for every independently resumable chapter.
             reports = []
             for _, label, extracted in job_pages:
-                narration = render(extracted, args.output_dir, label, backend, resources, cleanup, options, book_metadata)
+                narration_progress = TerminalProgress(label)
+                narration = render(
+                    extracted,
+                    args.output_dir,
+                    label,
+                    backend,
+                    resources,
+                    cleanup,
+                    options,
+                    book_metadata,
+                    progress=narration_progress.update,
+                )
+                narration_progress.finish()
                 summary_audio = None
                 if label in summaries:
                     result, _, _ = summaries[label]
@@ -378,13 +520,16 @@ def _run_book(args: argparse.Namespace) -> int:
                         code="read", schemas="read", tables="read", urls="read", citations="read", footnotes="read",
                         headers_footers=False,
                     )
+                    summary_progress = TerminalProgress(f"{label} conclusion")
                     summary_audio = render(
                         [(0, f"Conclusion. {result.text}")], args.output_dir, f"{label}-summary", backend,
-                        resources, summary_cleanup, options, book_metadata,
+                        resources, summary_cleanup, options, book_metadata, progress=summary_progress.update,
                     )
+                    summary_progress.finish()
                 podcast_audio = None
                 if label in podcasts:
                     result, _, _ = podcasts[label]
+                    podcast_progress = TerminalProgress(f"{label} podcast")
                     podcast_audio = render_script(
                         [
                             ScriptLine(
@@ -401,7 +546,9 @@ def _run_book(args: argparse.Namespace) -> int:
                         options,
                         book_metadata,
                         turn_pause_ms=args.podcast_turn_pause_ms,
+                        progress=podcast_progress.update,
                     )
+                    podcast_progress.finish()
                 reports.append((narration, summary_audio, summaries.get(label), podcast_audio, podcasts.get(label)))
         finally:
             backend.close()
@@ -458,13 +605,121 @@ def _run_book(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_farsi_translation(
+    args: argparse.Namespace,
+    job_pages,
+    cleanup: CleanupOptions,
+    resources: ResourceSettings,
+    book_metadata: dict[str, object],
+) -> int:
+    """Translate with MLX first, unload it, then narrate in native Persian."""
+    # Validate the local model up front. A missing voice should not cost a
+    # lengthy translation pass before reporting the one-time setup command.
+    model_path = piper_voice_path(args.farsi_model_dir, args.farsi_voice)
+    translation_options = TranslationOptions(
+        model=args.translation_model,
+        backend=args.translation_backend,
+        max_source_chars=args.translation_chunk_chars,
+        max_output_tokens=args.translation_max_tokens,
+        protected_terms=args.translation_protected_terms,
+        glossary=args.translation_glossary,
+        transliterations=args.translation_transliterations,
+    )
+    translator = (
+        NLLBPersianTranslator(args.translation_model)
+        if args.translation_backend == "nllb"
+        else MLXSummaryBackend(SummaryOptions(model=args.translation_model))
+    )
+    translator.configure(resources)
+    translated_jobs = []
+    try:
+        for _, label, extracted in job_pages:
+            translation_progress = TerminalProgress(f"{label} Persian")
+            report = translate_pages_to_persian(
+                extracted,
+                args.output_dir,
+                f"{label}-fa",
+                translator,
+                resources,
+                cleanup,
+                translation_options,
+                resume=args.resume,
+                progress=translation_progress.update,
+            )
+            translation_progress.finish()
+            translated_jobs.append((label, report))
+    finally:
+        # The Qwen translator must not remain resident while narration starts.
+        translator.close()
+
+    backend = PiperFarsiBackend(
+        model_path,
+        noise_scale=args.farsi_noise_scale,
+        noise_w_scale=args.farsi_noise_w_scale,
+    )
+    backend.configure(resources)
+    farsi_render_options = RenderOptions(
+        voice=args.farsi_voice,
+        speed=args.speed,
+        sample_rate=args.sample_rate,
+        chunk_pause_ms=args.chunk_pause_ms,
+        # English pronunciation substitutions are for Kokoro source reading;
+        # applying them to translated Persian could corrupt intentional terms.
+        pronunciations=(),
+        audio_format=args.format,
+        resume=args.resume,
+    )
+    try:
+        reports = []
+        for label, translation in translated_jobs:
+            lines = [ScriptLine(segment.page, segment.translation, args.farsi_voice) for segment in translation.segments]
+            narration_progress = TerminalProgress(f"{label} Persian audio")
+            narration = render_script(
+                lines,
+                args.output_dir,
+                f"{label}-fa",
+                backend,
+                resources,
+                farsi_render_options,
+                book_metadata,
+                turn_pause_ms=args.chunk_pause_ms,
+                script_kind="translation",
+                script_metadata={"language": "fa", "translation_sidecar": str(translation.sidecar)},
+                progress=narration_progress.update,
+            )
+            narration_progress.finish()
+            reports.append((narration, translation))
+    finally:
+        backend.close()
+    print(json.dumps([
+        {
+            "output": str(narration.output),
+            "chunks_total": narration.chunks_total,
+            "chunks_synthesized": narration.chunks_synthesized,
+            "audio_seconds": round(narration.audio_seconds, 2),
+            "wall_seconds": round(narration.wall_seconds, 2),
+            "translation": {
+                "language": translation.language,
+                "backend": translation.backend,
+                "model": translation.model,
+                "segments": len(translation.segments),
+                "sidecar": str(translation.sidecar),
+            },
+        }
+        for narration, translation in reports
+    ], indent=2))
+    return 0
+
+
 def _run_benchmark(args: argparse.Namespace) -> int:
     resources = _resources(args)
     _apply_thread_limits(resources)
     backend = KokoroMLXBackend()
     try:
         backend.configure(resources)
-        reports, recommended = benchmark_candidates(backend, resources, runs=args.runs)
+        progress = TerminalProgress("Benchmark")
+        reports, recommended = benchmark_candidates(backend, resources, runs=args.runs, progress=progress.update)
+        progress.finish()
     finally:
         backend.close()
     print(json.dumps({
@@ -505,6 +760,8 @@ def _run_serve(args: argparse.Namespace) -> int:
             allowed_origins=tuple(args.allow_origin),
         )
     )
+    progress = TerminalProgress("Local TTS server")
+    progress.finish(ProgressEvent("ready", 1, 1, 1, elapsed_seconds=0.0, detail=f"port {args.port}"))
     uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     return 0
 
@@ -526,8 +783,30 @@ def _run_setup_viewer(args: argparse.Namespace) -> int:
     if not args.force and (_pdfjs_root() / "build" / "pdf.mjs").is_file():
         print(f"PDF.js is already installed locally at {_pdfjs_root()}")
         return 0
+    progress = TerminalProgress("PDF.js setup")
+    started = time.perf_counter()
+    progress.update(ProgressEvent("installing", 0, 1, 0, elapsed_seconds=0.0, detail="downloading local assets"))
     subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=web_root, check=True)
+    progress.finish(ProgressEvent("ready", 1, 1, 1, elapsed_seconds=time.perf_counter() - started, detail="local assets installed"))
     print(f"PDF.js is ready locally at {_pdfjs_root()}")
+    return 0
+
+
+def _run_setup_farsi(args: argparse.Namespace) -> int:
+    try:
+        import piper  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - install-time concern
+        raise RuntimeError("Persian TTS support is unavailable; run `uv sync --extra farsi`") from exc
+    args.model_dir.mkdir(parents=True, exist_ok=True)
+    progress = TerminalProgress("Persian voice setup")
+    started = time.perf_counter()
+    progress.update(ProgressEvent("downloading", 0, 1, 0, elapsed_seconds=0.0, detail=args.voice))
+    subprocess.run(
+        [sys.executable, "-m", "piper.download_voices", args.voice, "--download-dir", str(args.model_dir)],
+        check=True,
+    )
+    progress.finish(ProgressEvent("ready", 1, 1, 1, elapsed_seconds=time.perf_counter() - started, detail=args.voice))
+    print(f"Persian voice {args.voice} is ready locally in {args.model_dir}")
     return 0
 
 
@@ -573,6 +852,8 @@ def _run_read(args: argparse.Namespace) -> int:
         open_browser=not args.no_open,
         custom_css=args.theme_css,
     )
+    progress = TerminalProgress("Local reader")
+    progress.finish(ProgressEvent("ready", 1, 1, 1, elapsed_seconds=0.0, detail=f"port {args.port}"))
     print(f"Opening local reader: {viewer_url}")
     uvicorn.run(app, host=args.host, port=args.port, access_log=False)
     return 0
@@ -584,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         import sys
         argv = sys.argv[1:]
-    if argv and argv[0] not in {"book", "benchmark", "serve", "setup-viewer", "read", "-h", "--help"}:
+    if argv and argv[0] not in {"book", "benchmark", "serve", "setup-viewer", "setup-farsi", "read", "-h", "--help"}:
         argv = ["book", *argv]
     args = parser.parse_args(argv)
     try:
@@ -594,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_serve(args)
         if args.command == "setup-viewer":
             return _run_setup_viewer(args)
+        if args.command == "setup-farsi":
+            return _run_setup_farsi(args)
         if args.command == "read":
             return _run_read(args)
         if args.command == "book":

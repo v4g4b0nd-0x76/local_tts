@@ -41,6 +41,19 @@ Hugging Face cache or a user-supplied model directory.
   retain per-turn voice identity in the resume hash, and persist a transcript
   plus model-cost sidecar. The supplied American-English pair is `af_bella`
   (host) and `am_michael` (explainer).
+- Persian translation is a separate, source-preserving NLLB (default) or Qwen
+  phase followed by a native Persian Piper voice. Persist source-to-translation
+  records before narration, normalize Arabic presentation forms to Persian
+  `ی`/`ک`, keep a reviewable sidecar, and unload the translator before Piper.
+  Protect configured source technical terms and names with copied placeholder
+  tokens; protection must override a Persian glossary and transliteration
+  replacement. Do not apply English pronunciation replacements to Persian
+  output. A Farsi voice is for Persian accent; do not claim it provides native
+  Arabic quotation pronunciation or natural English code switching.
+- Long-running CLI phases must report useful progress to stderr without
+  contaminating JSON stdout: extraction/LLM work use items per second and TTS
+  uses generated-audio seconds per wall-clock second. Keep progress callbacks
+  optional in core interfaces so non-CLI clients remain quiet.
 - The optional local HTTP service binds to loopback by default, holds one
   serial Kokoro inference stream, and bounds request size. Its PDF.js bridge
   uses stream chunk source offsets for highlighting; preserve exact source

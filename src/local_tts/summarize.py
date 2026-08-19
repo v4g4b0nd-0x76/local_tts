@@ -144,14 +144,50 @@ class MLXSummaryBackend:
         generation = self._generate(_podcast_prompt(context.sources, context.selected_pages, options), options.max_output_tokens)
         return PodcastResult(_parse_podcast_turns(generation.text, options.max_turns), generation)
 
-    def _generate(self, user_prompt: str, max_tokens: int) -> SummaryResult:
+    def translate_to_persian(
+        self,
+        source_text: str,
+        *,
+        max_tokens: int,
+        glossary: tuple[tuple[str, str], ...] = (),
+    ) -> SummaryResult:
+        """Translate one bounded source segment into natural Iranian Persian.
+
+        The translator is deliberately literal: a PDF study tool must retain
+        qualifications, numbers, causal relationships, and code identifiers
+        rather than turn translation into a summary.
+        """
+        if not source_text.strip():
+            raise ValueError("cannot translate an empty text segment")
+        glossary_lines = "\n".join(f"- {source} => {target}" for source, target in glossary)
+        prompt = (
+            "Translate the following English technical-study text into natural, standard Iranian Persian.\n"
+            "Return only the Persian translation: no title, preface, notes, Markdown fence, or explanation.\n"
+            "Preserve every claim, qualifier, negation, number, unit, formula, and sequence of steps.\n"
+            "Keep code identifiers, commands, file paths, URLs, and text inside backticks exactly unchanged. "
+            "For all other ordinary English words, names, acronyms, and loanwords, use natural Persian-script "
+            "transliteration or translation so the narration contains no stray Latin fragments. Use Persian ی and ک, "
+            "natural Persian punctuation, and Persian sentence flow.\n"
+            f"Required terminology:\n{glossary_lines or '- No fixed terminology supplied.'}\n\n"
+            f"Source text:\n<<<\n{source_text.strip()}\n>>>"
+        )
+        return self._generate(
+            prompt,
+            max_tokens,
+            system_message=(
+                "You are a meticulous English-to-Persian technical translator for Iranian readers. "
+                "Translate faithfully and fluently; never summarize, omit, add facts, or answer the source text."
+            ),
+        )
+
+    def _generate(self, user_prompt: str, max_tokens: int, *, system_message: str | None = None) -> SummaryResult:
         model, tokenizer = self._load()
         import mlx.core as mx
 
         messages = [
             {
                 "role": "system",
-                "content": (
+                "content": system_message or (
                     "You are a careful technical study companion. Use only the supplied PDF excerpts. "
                     "Do not invent facts, citations, or chapter links."
                 ),

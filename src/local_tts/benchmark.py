@@ -6,9 +6,11 @@ import resource
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
+from typing import Callable
 
 from .backends.base import TTSBackend
 from .models import ResourceSettings
+from .progress import ProgressEvent
 from .text import chunk_text
 
 # Long enough to cross every default chunk size and expose per-call overhead,
@@ -72,10 +74,28 @@ def benchmark_candidates(
     backend: TTSBackend,
     resources: ResourceSettings,
     runs: int = 3,
+    *,
+    progress: Callable[[ProgressEvent], None] | None = None,
 ) -> tuple[list[BenchmarkReport], BenchmarkReport]:
     """Probe practical chunk sizes and return the best memory-safe result."""
     candidates = tuple(dict.fromkeys((500, 900, 1400, resources.chunk_chars)))
-    reports = [benchmark(backend, replace(resources, chunk_chars=size), runs=runs) for size in candidates]
+    reports: list[BenchmarkReport] = []
+    started = time.perf_counter()
+    for index, size in enumerate(candidates, start=1):
+        report = benchmark(backend, replace(resources, chunk_chars=size), runs=runs)
+        reports.append(report)
+        if progress is not None:
+            progress(
+                ProgressEvent(
+                    "benchmarking",
+                    index,
+                    len(candidates),
+                    index,
+                    sum(item.audio_seconds for item in reports),
+                    time.perf_counter() - started,
+                    f"chunk size {size}",
+                )
+            )
     safe = [report for report in reports if report.within_memory_ceiling]
     if not safe:
         raise RuntimeError("every benchmark candidate exceeded the advisory memory ceiling")

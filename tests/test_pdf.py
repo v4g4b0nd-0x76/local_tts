@@ -7,6 +7,7 @@ from local_tts.pdf import (
     PDFDocument,
     _chapters_from_starts,
     _classify_layout_lines,
+    _preferred_reading_text,
     _unique_outline_starts,
     chapter_pages,
     page_range,
@@ -33,7 +34,9 @@ def test_pdf_document_reuses_its_reader_for_inspection_and_extraction(tmp_path: 
         page_count, _ = document.inspect()
         assert page_count == 1
         assert document.reader is reader
-        assert document.extract_pages([1])[0].text == ""
+        progress = []
+        assert document.extract_pages([1], progress=lambda *event: progress.append(event))[0].text == ""
+    assert progress == [(1, 1, 1)]
 
 
 def test_duplicate_outline_destinations_do_not_create_inverted_chapters() -> None:
@@ -51,6 +54,17 @@ def test_layout_classifier_marks_code_and_table_runs() -> None:
     assert detected["struct file *files[4];"] == "code"
     assert detected["field | type"] == "table"
     assert detected["id | integer"] == "table"
+
+
+def test_reading_text_prefers_layout_when_it_repairs_pdf_character_spacing() -> None:
+    plain = "T o Students, it is an hono r to provide knowledg e."
+    layout = "To Students, it is an honor to provide knowledge."
+    assert _preferred_reading_text(plain, layout) == layout
+
+
+def test_reading_text_keeps_plain_when_layout_loses_most_content() -> None:
+    plain = "A complete page with several useful sentences."
+    assert _preferred_reading_text(plain, "A short fragment") == plain
 
 
 def test_layout_classifier_ignores_contents_leaders_and_keeps_schema_run() -> None:
