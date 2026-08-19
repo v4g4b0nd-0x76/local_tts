@@ -11,6 +11,15 @@ voice = "bf_emma"
 speed = 0.92
 sample_rate = 24000
 
+[summary]
+model = "local/model"
+context_chars = 9000
+max_output_tokens = 320
+max_references = 2
+
+[pronunciation]
+"prob lem" = "problum"
+
 [cleanup]
 code = "explain"
 schemas = "explain"
@@ -34,6 +43,11 @@ directory = "spoken"
     assert args.keep_headers_footers is True
     assert args.format == "m4b"
     assert args.output_dir == Path("spoken")
+    assert args.summary_model == "local/model"
+    assert args.summary_context_chars == 9000
+    assert args.summary_max_tokens == 320
+    assert args.summary_references == 2
+    assert args.pronunciations == (("prob lem", "problum"),)
 
 
 def test_explicit_cli_reader_value_beats_config(tmp_path: Path) -> None:
@@ -43,3 +57,8 @@ def test_explicit_cli_reader_value_beats_config(tmp_path: Path) -> None:
     _apply_book_config(args)
     assert args.voice == "af_bella"
     assert args.speed == 0.96
+
+
+def test_misspelled_summerize_alias_is_supported() -> None:
+    args = _parser().parse_args(["book", "book.pdf", "--summerize"])
+    assert args.summarize is True

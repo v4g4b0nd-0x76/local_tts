@@ -1,0 +1,41 @@
+# A slower, smoother local preset for technical-study listening.
+#
+# It uses the same Kokoro model and resource profile as the regular reader.
+# The longer result comes from a calmer speaking rate and 180 ms chunk joins,
+# not a larger model or additional hardware.
+
+[reader]
+voice = "bf_emma"
+speed = 0.92
+sample_rate = 24000
+chunk_pause_ms = 180
+
+[pronunciation]
+# Repair PDF line-break spellings before Kokoro. Its British-English G2P
+# already has the ordinary word `problem`; only the split forms need help.
+"prob lem" = "problem"
+"prob-lem" = "problem"
+
+[summary]
+# Optional: install with `uv sync --extra summarize` before using --summarize.
+# This Apache-2.0 4-bit MLX model is loaded and released before Kokoro loads.
+model = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+context_chars = 32000
+max_output_tokens = 480
+max_references = 3
+
+[cleanup]
+code = "explain"
+schemas = "explain"
+tables = "explain"
+urls = "skip"
+citations = "skip"
+footnotes = "skip"
+headers_footers = true
+
+[resources]
+profile = "balanced"
+
+[output]
+format = "m4b"
+directory = "output"

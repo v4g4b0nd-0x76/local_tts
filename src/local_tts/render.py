@@ -18,7 +18,8 @@ import numpy as np
 
 from .backends.base import TTSBackend
 from .models import CleanupOptions, RenderOptions, ResourceSettings
-from .text import chunk_text, clean_page, repeated_margin_lines
+from .pdf import ExtractedPage
+from .text import apply_pronunciations, chunk_text, clean_page, repeated_margin_lines
 
 _STATE_VERSION = 2
 
@@ -30,6 +31,9 @@ class RenderReport:
     chunks_synthesized: int
     audio_seconds: float
     wall_seconds: float
+    detected_code_lines: int
+    detected_schema_lines: int
+    detected_table_lines: int
 
 
 @dataclass(frozen=True)
@@ -65,7 +69,14 @@ class _CheckpointStore:
             self.pcm_path.write_bytes(b"")
             self.journal_path.write_text("")
 
-    def write_manifest(self, resources: ResourceSettings, cleanup: CleanupOptions, options: RenderOptions) -> None:
+    def write_manifest(
+        self,
+        resources: ResourceSettings,
+        cleanup: CleanupOptions,
+        options: RenderOptions,
+        book_metadata: dict[str, object] | None,
+        layout_summary: dict[str, int],
+    ) -> None:
         manifest = {
             "version": _STATE_VERSION,
             "audio_encoding": "s16le",
@@ -73,6 +84,8 @@ class _CheckpointStore:
             "resources": resources.as_dict(),
             "cleanup": asdict(cleanup),
             "render_options": asdict(options),
+            "book_metadata": book_metadata or {},
+            "layout_summary": layout_summary,
         }
         _atomic_json(self.manifest_path, manifest)
 
@@ -153,21 +166,23 @@ class _CheckpointStore:
 
 
 def render(
-    extracted_pages: list[tuple[int, str]],
+    extracted_pages: list[tuple[int, str] | ExtractedPage],
     output_dir: Path,
     label: str,
     backend: TTSBackend,
     resources: ResourceSettings,
     cleanup: CleanupOptions,
     options: RenderOptions,
+    book_metadata: dict[str, object] | None = None,
 ) -> RenderReport:
     """Render selected pages with bounded CPU preparation and durable resume."""
     output_dir.mkdir(parents=True, exist_ok=True)
     job_dir = output_dir / f".{label}.local-tts"
     store = _CheckpointStore(job_dir, options.resume)
+    layout_summary = _layout_summary(extracted_pages)
     if not options.resume:
-        store.write_manifest(resources, cleanup, options)
-    margins = repeated_margin_lines([text for _, text in extracted_pages]) if cleanup.headers_footers else set()
+        store.write_manifest(resources, cleanup, options, book_metadata, layout_summary)
+    margins = repeated_margin_lines([_page_parts(page)[1] for page in extracted_pages]) if cleanup.headers_footers else set()
     started = time.perf_counter()
     synthesized = 0
     total_audio = 0.0
@@ -179,16 +194,18 @@ def render(
     for page, cleaned in _cleaned_pages(extracted_pages, cleanup, margins, resources):
         for text in chunk_text(cleaned, resources.chunk_chars):
             chunks_total += 1
-            text_hash = _text_hash(page, text, options)
+            spoken_text = apply_pronunciations(text, options.pronunciations)
+            text_hash = _text_hash(page, spoken_text, options)
             checkpoint = store.records.get(chunks_total)
             if options.resume and checkpoint is not None:
                 _verify_checkpoint(chunks_total, checkpoint, page, text_hash)
                 total_audio += checkpoint.duration_seconds
                 continue
 
-            result = backend.synthesize(text, voice=options.voice, speed=options.speed, sample_rate=options.sample_rate)
-            duration = result.duration_seconds
-            end_bytes = store.append_audio(result.audio) if result.audio.size else _pcm_size(store.pcm_path)
+            result = backend.synthesize(spoken_text, voice=options.voice, speed=options.speed, sample_rate=options.sample_rate)
+            audio = _with_pause(result.audio, result.sample_rate, options.chunk_pause_ms)
+            duration = len(audio) / result.sample_rate
+            end_bytes = store.append_audio(audio) if audio.size else _pcm_size(store.pcm_path)
             store.append_checkpoint(
                 chunks_total,
                 _Checkpoint(page, text_hash, duration, end_bytes, empty=result.audio.size == 0),
@@ -203,14 +220,25 @@ def render(
 
     output = output_dir / f"{label}.{options.audio_format}"
     if not (options.resume and store.completed and output.exists() and synthesized == 0):
-        _encode(store.pcm_path, output, options.audio_format, options.sample_rate, resources.cpu_threads)
+        _encode(
+            store.pcm_path,
+            output,
+            options.audio_format,
+            options.sample_rate,
+            resources.cpu_threads,
+            book_metadata,
+            label,
+        )
         store.mark_complete(output)
     elapsed = time.perf_counter() - started
-    return RenderReport(output, chunks_total, synthesized, total_audio, elapsed)
+    return RenderReport(
+        output, chunks_total, synthesized, total_audio, elapsed,
+        layout_summary["code_lines"], layout_summary["schema_lines"], layout_summary["table_lines"],
+    )
 
 
 def _cleaned_pages(
-    extracted_pages: list[tuple[int, str]],
+    extracted_pages: list[tuple[int, str] | ExtractedPage],
     cleanup: CleanupOptions,
     margins: set[str],
     resources: ResourceSettings,
@@ -222,10 +250,11 @@ def _cleaned_pages(
         def fill() -> None:
             while len(pending) < resources.prefetch:
                 try:
-                    page, text = next(source)
+                    item = next(source)
                 except StopIteration:
                     return
-                pending.append((page, executor.submit(clean_page, text, cleanup, margins)))
+                page, text, layout_kinds = _page_parts(item)
+                pending.append((page, executor.submit(clean_page, text, cleanup, margins, layout_kinds)))
 
         fill()
         while pending:
@@ -237,7 +266,8 @@ def _cleaned_pages(
 
 
 def _text_hash(page: int, text: str, options: RenderOptions) -> str:
-    data = f"{page}\0{options.voice}\0{options.speed}\0{options.sample_rate}\0{text}".encode()
+    pronunciations = "\x1e".join(f"{source}\x1f{spoken}" for source, spoken in options.pronunciations)
+    data = f"{page}\0{options.voice}\0{options.speed}\0{options.sample_rate}\0{options.chunk_pause_ms}\0{pronunciations}\0{text}".encode()
     return hashlib.sha256(data).hexdigest()
 
 
@@ -253,6 +283,30 @@ def _as_pcm16(audio: np.ndarray) -> bytes:
     return np.rint(np.clip(samples, -1.0, 1.0) * 32767).astype("<i2", copy=False).tobytes()
 
 
+def _with_pause(audio: np.ndarray, sample_rate: int, pause_ms: int) -> np.ndarray:
+    if pause_ms <= 0 or audio.size == 0:
+        return audio
+    pause = np.zeros(round(sample_rate * pause_ms / 1000), dtype=np.float32)
+    return np.concatenate((np.asarray(audio, dtype=np.float32), pause))
+
+
+def _page_parts(item: tuple[int, str] | ExtractedPage) -> tuple[int, str, dict[str, str]]:
+    if isinstance(item, ExtractedPage):
+        return item.number, item.text, item.technical_lines
+    page, text = item
+    return page, text, {}
+
+
+def _layout_summary(items: list[tuple[int, str] | ExtractedPage]) -> dict[str, int]:
+    pages = [item for item in items if isinstance(item, ExtractedPage)]
+    return {
+        "layout_aware_pages": len(pages),
+        "code_lines": sum(page.layout_stats.code_lines for page in pages),
+        "schema_lines": sum(page.layout_stats.schema_lines for page in pages),
+        "table_lines": sum(page.layout_stats.table_lines for page in pages),
+    }
+
+
 def _pcm_size(path: Path) -> int:
     return path.stat().st_size if path.exists() else 0
 
@@ -263,7 +317,15 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def _encode(pcm_path: Path, output: Path, audio_format: str, sample_rate: int, cpu_threads: int) -> None:
+def _encode(
+    pcm_path: Path,
+    output: Path,
+    audio_format: str,
+    sample_rate: int,
+    cpu_threads: int,
+    book_metadata: dict[str, object] | None,
+    label: str,
+) -> None:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required for final audio encoding")
     if _pcm_size(pcm_path) == 0:
@@ -278,6 +340,19 @@ def _encode(pcm_path: Path, output: Path, audio_format: str, sample_rate: int, c
     command = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
         "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i", str(pcm_path),
-        "-threads", str(cpu_threads), *codecs[audio_format], str(output),
+        "-threads", str(cpu_threads), *_ffmpeg_metadata(book_metadata, label), *codecs[audio_format], str(output),
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
+
+
+def _ffmpeg_metadata(book_metadata: dict[str, object] | None, label: str) -> list[str]:
+    if not book_metadata:
+        return []
+    title = str(book_metadata.get("title") or "")
+    values = {
+        "title": f"{title} - {label}" if title else label,
+        "album": title,
+        "artist": str(book_metadata.get("author") or ""),
+        "comment": str(book_metadata.get("subject") or ""),
+    }
+    return [argument for key, value in values.items() if value for argument in ("-metadata", f"{key}={value}")]

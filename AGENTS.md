@@ -28,6 +28,16 @@ Hugging Face cache or a user-supplied model directory.
 - Text cleanup must be conservative and configurable: technical prose should
   remain readable; code, tables, URLs, citations, headers/footers, page numbers,
   hyphenated line breaks, and footnotes are separately controllable.
+- Keep normal and layout-preserving `pypdf` extraction together. Layout
+  classification must be high-confidence: preserve SQL schemas as `schema`
+  runs, require multi-row evidence for tables, and exclude dotted contents
+  leaders. Preserve PDF metadata in the job manifest and final audio tags.
+- Optional conclusions use MLX-LM only behind the summary adapter. Keep source
+  context bounded, include only the previous outline chapter plus explicit
+  `Chapter N` references, record the exact context in a sidecar, and unload
+  the LLM before loading Kokoro so unified-memory footprints never overlap.
+- Reader pronunciation fixes are explicit configuration mappings applied just
+  before synthesis. They must be part of the resume hash and have tests.
 - Use ffmpeg only for final audio encoding. Keep a single append-only signed
   16-bit PCM stream plus a durable JSONL checkpoint journal so resume works
   independently of a failed final encode without creating one WAV per chunk.
@@ -40,4 +50,5 @@ Hugging Face cache or a user-supplied model directory.
 
 Run `uv run pytest`, `uv run local-tts --help`, and `uv run local-tts benchmark`
 after installing model dependencies. A real smoke test must use a real PDF page
-range and verify the resulting audio with `ffprobe`.
+range, verify the resulting audio with `ffprobe`, and inspect `--metadata` when
+metadata or layout handling changes.

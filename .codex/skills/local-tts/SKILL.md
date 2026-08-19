@@ -14,5 +14,15 @@ Use this guidance for work on `local-tts`.
    process-wide cgroup.
 5. Do not "clean" away technical content by default. Expose cleanup decisions
    through options and test the text transformations independently from TTS.
-6. Verify new backends with a short real PDF synthesis and `ffprobe`, plus unit
-   tests that do not require downloading model weights.
+6. Use `pypdf`'s layout-preserving extraction beside regular text extraction for
+   technical-block detection. Require a code/schema signal or a multi-row
+   table run; never classify dotted contents leaders as a table. Carry embedded
+   PDF metadata into the job manifest and supported audio tags.
+7. Verify new backends with a short real PDF synthesis and `ffprobe`, plus unit
+   tests that do not require downloading model weights. For layout changes,
+   also inspect `local-tts book.pdf --metadata` and at least one real code or
+   table page.
+8. For optional LLM summaries, use a local MLX model, treat selected pages as
+   primary evidence, cap all chapter context, and persist provenance and cost
+   metrics. Unload the LLM before Kokoro synthesis and test planning without
+   downloading model weights.

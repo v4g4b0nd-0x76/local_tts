@@ -10,6 +10,8 @@
 voice = "bf_emma"
 # Slightly below normal rate gives technical terms and transitions more space.
 speed = 1.2
+# A short pause after each durable chunk avoids abrupt joins in long chapters.
+chunk_pause_ms = 180
 # Native Kokoro output. 48000 only upsamples and does not add model detail.
 sample_rate = 24000
 

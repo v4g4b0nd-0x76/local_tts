@@ -53,4 +53,6 @@ class RenderOptions:
     speed: float = 1.0
     audio_format: str = "m4a"
     sample_rate: int = 24000
+    chunk_pause_ms: int = 0
+    pronunciations: tuple[tuple[str, str], ...] = ()
     resume: bool = False

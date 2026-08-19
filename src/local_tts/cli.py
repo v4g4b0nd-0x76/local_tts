@@ -13,6 +13,7 @@ from .config import config_value, load_config
 from .models import CleanupOptions, PROFILES, ProfileName, RenderOptions, ResourceSettings
 from .pdf import PDFDocument, chapter_pages, page_range
 from .render import render
+from .summarize import MLXSummaryBackend, SummaryOptions, build_summary_context, write_summary
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -43,12 +44,22 @@ def _add_book_args(parser: argparse.ArgumentParser) -> None:
     select.add_argument("--chapters", metavar="N-M")
     select.add_argument("--pages", metavar="N-M")
     parser.add_argument("--list", action="store_true", help="list page count and extracted outline")
+    parser.add_argument("--metadata", action="store_true", help="print embedded PDF/book metadata as JSON")
+    parser.add_argument(
+        "--summarize", "--summerize", dest="summarize", action="store_true",
+        help="write and narrate a local conclusion using selected pages plus bounded chapter context",
+    )
+    parser.add_argument("--summary-model", help="local MLX model for --summarize")
+    parser.add_argument("--summary-context-chars", type=int, help="maximum source characters sent to the local summary model")
+    parser.add_argument("--summary-max-tokens", type=int, help="maximum tokens in the concluded summary")
+    parser.add_argument("--summary-references", type=int, help="number of explicitly referenced chapters to include (0-8)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--format", choices=["m4a", "m4b", "mp3"])
     parser.add_argument("--voice")
     parser.add_argument("--speed", type=float)
     parser.add_argument("--sample-rate", type=int, choices=[24000, 48000])
+    parser.add_argument("--chunk-pause-ms", type=int, help="silence after each synthesized chunk for calmer transitions")
     parser.add_argument("--code", choices=["skip", "read", "explain"])
     parser.add_argument("--schemas", choices=["skip", "read", "explain"])
     parser.add_argument("--tables", choices=["skip", "read", "explain"])
@@ -88,6 +99,11 @@ def _apply_book_config(args: argparse.Namespace) -> None:
     assign("voice", "reader", "voice", "af_heart")
     assign("speed", "reader", "speed", 1.0)
     assign("sample_rate", "reader", "sample_rate", 24000)
+    assign("chunk_pause_ms", "reader", "chunk_pause_ms", 0)
+    assign("summary_model", "summary", "model", None)
+    assign("summary_context_chars", "summary", "context_chars", 32_000)
+    assign("summary_max_tokens", "summary", "max_output_tokens", 480)
+    assign("summary_references", "summary", "max_references", 3)
     assign("output_dir", "output", "directory", Path("output"))
     if isinstance(args.output_dir, str):
         args.output_dir = Path(args.output_dir)
@@ -101,6 +117,25 @@ def _apply_book_config(args: argparse.Namespace) -> None:
         raise ValueError("reader speed must be greater than zero")
     if args.sample_rate not in {24000, 48000}:
         raise ValueError("reader sample_rate must be 24000 or 48000")
+    if not 0 <= args.chunk_pause_ms <= 2000:
+        raise ValueError("reader chunk_pause_ms must be between 0 and 2000")
+    if args.summary_context_chars < 4_000:
+        raise ValueError("summary context must be at least 4000 characters")
+    if not 64 <= args.summary_max_tokens <= 4_096:
+        raise ValueError("summary max output tokens must be between 64 and 4096")
+    if not 0 <= args.summary_references <= 8:
+        raise ValueError("summary references must be between 0 and 8")
+    args.pronunciations = _pronunciations(config)
+
+
+def _pronunciations(config: dict[str, dict[str, object]]) -> tuple[tuple[str, str], ...]:
+    values = config.get("pronunciation", {})
+    replacements: list[tuple[str, str]] = []
+    for source, spoken in values.items():
+        if not isinstance(source, str) or not isinstance(spoken, str) or not source.strip() or not spoken.strip():
+            raise ValueError("[pronunciation] entries must map non-empty text to non-empty spoken text")
+        replacements.append((source, spoken))
+    return tuple(replacements)
 
 
 def _apply_thread_limits(resources: ResourceSettings) -> None:
@@ -131,6 +166,13 @@ def _print_document_inspection(document: PDFDocument) -> None:
 def _run_book(args: argparse.Namespace) -> int:
     if not args.pdf.is_file():
         raise ValueError(f"PDF not found: {args.pdf}")
+    if args.list or args.metadata:
+        with PDFDocument(args.pdf) as document:
+            if args.list:
+                _print_document_inspection(document)
+            if args.metadata:
+                print(json.dumps(document.metadata(), indent=2))
+        return 0
     _apply_book_config(args)
     resources = _resources(args)
     _apply_thread_limits(resources)
@@ -139,16 +181,18 @@ def _run_book(args: argparse.Namespace) -> int:
         footnotes=args.footnotes, headers_footers=not args.keep_headers_footers,
     )
     options = RenderOptions(
-        voice=args.voice, speed=args.speed, sample_rate=args.sample_rate,
-        audio_format=args.format, resume=args.resume,
+        voice=args.voice, speed=args.speed, sample_rate=args.sample_rate, chunk_pause_ms=args.chunk_pause_ms,
+        pronunciations=args.pronunciations, audio_format=args.format, resume=args.resume,
     )
-    backend = KokoroMLXBackend()
-    backend.configure(resources)
+    summary_options = SummaryOptions(
+        model=args.summary_model or SummaryOptions().model,
+        max_context_chars=args.summary_context_chars,
+        max_output_tokens=args.summary_max_tokens,
+        max_reference_chapters=args.summary_references,
+    )
     with PDFDocument(args.pdf) as document:
-        if args.list:
-            _print_document_inspection(document)
-            return 0
         page_count, chapters = document.inspect()
+        book_metadata = document.metadata()
         if args.chapter:
             pages, label = chapter_pages(chapters, args.chapter)
             jobs = [(pages, label)]
@@ -170,18 +214,72 @@ def _run_book(args: argparse.Namespace) -> int:
                 if chapters
                 else [(list(range(1, page_count + 1)), "whole-book")]
             )
+        # Keep selected text in memory once. This is small compared with model
+        # weights and lets summary generation and rendering share extraction.
+        job_pages = [(pages, label, document.extract_pages(pages)) for pages, label in jobs]
+        summaries = {}
+        if args.summarize:
+            summary_backend = MLXSummaryBackend(summary_options)
+            summary_backend.configure(resources)
+            try:
+                for pages, label, extracted in job_pages:
+                    context = build_summary_context(document, extracted, chapters, cleanup, summary_options)
+                    result = summary_backend.summarize(context)
+                    markdown, details = write_summary(args.output_dir, label, context, result)
+                    summaries[label] = (result, markdown, details)
+            finally:
+                # The LLM and Kokoro intentionally never stay loaded together.
+                summary_backend.close()
+        backend = KokoroMLXBackend()
+        backend.configure(resources)
         try:
             # The document stays open, so a whole book does not reparse its
             # cross-reference table for every independently resumable chapter.
-            reports = [
-                render(document.extract_pages(pages), args.output_dir, label, backend, resources, cleanup, options)
-                for pages, label in jobs
-            ]
+            reports = []
+            for _, label, extracted in job_pages:
+                narration = render(extracted, args.output_dir, label, backend, resources, cleanup, options, book_metadata)
+                summary_audio = None
+                if label in summaries:
+                    result, _, _ = summaries[label]
+                    summary_cleanup = CleanupOptions(
+                        code="read", schemas="read", tables="read", urls="read", citations="read", footnotes="read",
+                        headers_footers=False,
+                    )
+                    summary_audio = render(
+                        [(0, f"Conclusion. {result.text}")], args.output_dir, f"{label}-summary", backend,
+                        resources, summary_cleanup, options, book_metadata,
+                    )
+                reports.append((narration, summary_audio, summaries.get(label)))
         finally:
             backend.close()
     print(json.dumps([
-        {"output": str(report.output), "chunks_total": report.chunks_total, "chunks_synthesized": report.chunks_synthesized, "audio_seconds": round(report.audio_seconds, 2), "wall_seconds": round(report.wall_seconds, 2)}
-        for report in reports
+        {
+            "output": str(report.output),
+            "chunks_total": report.chunks_total,
+            "chunks_synthesized": report.chunks_synthesized,
+            "audio_seconds": round(report.audio_seconds, 2),
+            "wall_seconds": round(report.wall_seconds, 2),
+            "detected_code_lines": report.detected_code_lines,
+            "detected_schema_lines": report.detected_schema_lines,
+            "detected_table_lines": report.detected_table_lines,
+            **(
+                {
+                    "summary": {
+                        "text": str(summary_files[1]),
+                        "details": str(summary_files[2]),
+                        "audio": str(summary_audio.output),
+                        "input_tokens": summary_files[0].input_tokens,
+                        "output_tokens": summary_files[0].output_tokens,
+                        "wall_seconds": round(summary_files[0].wall_seconds, 2),
+                        "mlx_active_mb": round(summary_files[0].mlx_active_mb, 1),
+                        "mlx_peak_mb": round(summary_files[0].mlx_peak_mb, 1),
+                    }
+                }
+                if summary_files and summary_audio
+                else {}
+            ),
+        }
+        for report, summary_audio, summary_files in reports
     ], indent=2))
     return 0
 

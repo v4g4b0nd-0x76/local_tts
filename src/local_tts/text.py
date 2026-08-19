@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Iterable
+from typing import Mapping
 
 from .models import CleanupOptions
 
@@ -12,14 +13,21 @@ _URL = re.compile(r"(?:\b(?:visit|see|available\s+at)\s+)?(?:https?://\S+|www\.\
 _CITATION = re.compile(r"\[(?:\d+(?:\s*[,;-]\s*\d+)*)\]|\([^)]*\b(?:19|20)\d{2}[a-z]?[^)]*\)")
 _FOOTNOTE = re.compile(r"^\s*(?:\d+|[*†‡])\s+.+$")
 _PAGE_NUMBER = re.compile(r"^\s*(?:page\s+)?\d+\s*$", re.IGNORECASE)
-_SCHEMA = re.compile(r"\b(?:CREATE\s+TABLE|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX|PRIMARY\s+KEY|FOREIGN\s+KEY)\b", re.IGNORECASE)
-_CODE = re.compile(r"(?:^\s{4,}|[{};]|\b(?:def|class|function|func|SELECT|INSERT|UPDATE|DELETE|FROM|return|import)\b)", re.IGNORECASE)
+_SCHEMA = re.compile(
+    r"(?:\b(?:CREATE\s+TABLE|ALTER\s+TABLE|CREATE\s+(?:UNIQUE\s+)?INDEX)\b|^\s*(?:PRIMARY|FOREIGN)\s+KEY\s*\()",
+    re.IGNORECASE,
+)
+_CODE = re.compile(
+    r"(?:^\s{4,}|[{}]|\b(?:char|short|int|long|float|double|void|size_t|u?int\d*_t|struct\s+\w+|enum\s+\w+)\s*\*?\s*\w+(?:\s*\[[^\]]+\])?\s*;|(?:^|\s)//|\w+\s*\([^)]*\)\s*[;{]|\breturn\s*\w*\s*;|(?:^|\s)(?:\$|prompt>)\s*|^\s*(?:def\s+\w+|class\s+\w+|function\s+\w+\s*\(|func\s+\w+|import\s+\w+|SELECT\b|INSERT\b|UPDATE\b|DELETE\b))",
+    re.IGNORECASE,
+)
 _TABLE = re.compile(r"^\s*\S+(?:\s*\|\s*|\t|\s{3,})\S+")
 _TABLE_NAME = re.compile(r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`\[]?([A-Za-z_][\w$]*)", re.IGNORECASE)
 _INDEX_NAME = re.compile(r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+([A-Za-z_][\w$]*)", re.IGNORECASE)
 _FUNCTION = re.compile(r"\b(?:def|function|func)\s+([A-Za-z_][\w$]*)", re.IGNORECASE)
 _CLASS = re.compile(r"\bclass\s+([A-Za-z_][\w$]*)", re.IGNORECASE)
 _FROM = re.compile(r"\bFROM\s+([A-Za-z_][\w$]*)", re.IGNORECASE)
+_C_DATA_STRUCTURE = re.compile(r"\b(?:struct|enum)\s+([A-Za-z_][\w$]*)", re.IGNORECASE)
 
 
 def repeated_margin_lines(page_texts: Iterable[str], threshold: int = 2) -> set[str]:
@@ -31,7 +39,12 @@ def repeated_margin_lines(page_texts: Iterable[str], threshold: int = 2) -> set[
     return {line for line, count in candidates.items() if count >= threshold and not _PAGE_NUMBER.match(line)}
 
 
-def clean_page(text: str, options: CleanupOptions, margins: set[str] | None = None) -> str:
+def clean_page(
+    text: str,
+    options: CleanupOptions,
+    margins: set[str] | None = None,
+    layout_kinds: Mapping[str, str] | None = None,
+) -> str:
     """Clean prose and apply explicit skip/read/explain technical-block policy.
 
     Explanations are deterministic local summaries, not a hidden LLM pass.
@@ -41,6 +54,7 @@ def clean_page(text: str, options: CleanupOptions, margins: set[str] | None = No
     margins = margins or set()
     lines = _normalise_lines(text)
     kept: list[str] = []
+    explanations: set[str] = set()
     index = 0
     while index < len(lines):
         raw_line = lines[index]
@@ -48,21 +62,27 @@ def clean_page(text: str, options: CleanupOptions, margins: set[str] | None = No
         if not line or (options.headers_footers and (line in margins or _PAGE_NUMBER.match(line))):
             index += 1
             continue
-        if options.footnotes == "skip" and _FOOTNOTE.match(line):
+        kind = _line_kind(raw_line, layout_kinds)
+        if options.footnotes == "skip" and kind is None and _FOOTNOTE.match(line):
             index += 1
             continue
-        kind = _technical_kind(raw_line)
         if kind is None:
             kept.append(line)
             index += 1
             continue
 
-        block, index = _collect_block(lines, index, kind)
+        block, index = _collect_block(lines, index, kind, layout_kinds)
         policy = _technical_policy(kind, options)
         if policy == "read":
             kept.append(" ".join(part.strip() for part in block))
         elif policy == "explain":
-            kept.append(_explain_block(kind, block))
+            explanation = _explain_block(kind, block)
+            # A PDF may split one visual code listing into fragments (for
+            # example source, terminal output, then a second command). The
+            # same generic notice should not be spoken repeatedly on a page.
+            if explanation not in explanations:
+                kept.append(explanation)
+                explanations.add(explanation)
         # `skip` deliberately emits nothing.
 
     result = " ".join(kept)
@@ -71,6 +91,23 @@ def clean_page(text: str, options: CleanupOptions, margins: set[str] | None = No
     if options.citations == "skip":
         result = _CITATION.sub("", result)
     return re.sub(r"\s+", " ", result).strip()
+
+
+def apply_pronunciations(text: str, replacements: tuple[tuple[str, str], ...]) -> str:
+    """Apply user-owned spoken-spelling rewrites immediately before TTS.
+
+    PDF extraction can separate a word at an awkward location. The config is
+    intentionally a spelling-to-spelling dictionary rather than a hidden
+    phoneme API: the rendered text stays inspectable and portable between TTS
+    backends.
+    """
+    for source, spoken in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+        words = source.strip()
+        if not words:
+            continue
+        pattern = r"(?<!\w)" + r"\s+".join(re.escape(part) for part in words.split()) + r"(?!\w)"
+        text = re.sub(pattern, spoken, text, flags=re.IGNORECASE)
+    return text
 
 
 def _normalise_lines(text: str) -> list[str]:
@@ -96,13 +133,27 @@ def _technical_kind(line: str) -> str | None:
     return None
 
 
-def _collect_block(lines: list[str], start: int, kind: str) -> tuple[list[str], int]:
+def _collect_block(
+    lines: list[str], start: int, kind: str, layout_kinds: Mapping[str, str] | None
+) -> tuple[list[str], int]:
     block: list[str] = []
     index = start
-    while index < len(lines) and _technical_kind(lines[index]) == kind:
+    while index < len(lines) and _line_kind(lines[index], layout_kinds) == kind:
         block.append(lines[index])
         index += 1
     return block, index
+
+
+def _line_kind(line: str, layout_kinds: Mapping[str, str] | None) -> str | None:
+    normalised = " ".join(line.split())
+    layout_kind = (layout_kinds or {}).get(normalised)
+    text_kind = _technical_kind(line)
+    # Layout is better at tables, but normal text can sometimes retain source
+    # spacing that layout extraction compresses. Never let a weak table match
+    # override a concrete code or schema signature.
+    if layout_kind == "table" and text_kind in {"code", "schema"}:
+        return text_kind
+    return layout_kind or text_kind
 
 
 def _technical_policy(kind: str, options: CleanupOptions) -> str:
@@ -125,6 +176,13 @@ def _explain_block(kind: str, block: list[str]) -> str:
     if kind == "table":
         headers = _table_headers(block)
         return f"A table is shown with columns {', '.join(headers)}." if headers else "A table is shown here."
+    if "prompt>" in joined or re.search(r"(?:^|\s)\$\s", joined):
+        return "A shell session demonstrates compiling or running the example program."
+    if "printf" in joined and "while" in joined:
+        return "C code example that repeatedly prints a value in a loop."
+    data_structure = _C_DATA_STRUCTURE.search(joined)
+    if data_structure:
+        return f"C data-structure definition for {data_structure.group(1)}."
     function = _FUNCTION.search(joined)
     if function:
         return f"Code example defining the function {function.group(1)}."
@@ -154,6 +212,11 @@ def _schema_fields(text: str) -> list[str]:
 def _table_headers(block: list[str]) -> list[str]:
     first = block[0].strip()
     parts = first.split("|") if "|" in first else re.split(r"\t|\s{3,}", first)
+    parts = [part.strip() for part in parts if part.strip()]
+    if len(parts) == 1:
+        # Plain extraction often collapses the spaces from a layout-recognised
+        # header like `Pass(A)  Pass(B)  Who Runs?`. Keep the labels legible.
+        parts = re.split(r"(?<=\))\s+(?=[A-Z])", first)
     return [part.strip() for part in parts if part.strip()][:8]
 
 

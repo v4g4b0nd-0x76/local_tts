@@ -26,17 +26,26 @@ uv sync --extra dev
 uv run pytest
 ```
 
+To use local LLM study conclusions, install the optional MLX-LM dependency:
+
+```bash
+uv sync --extra summarize
+```
+
 ## Use
 
 These forms all work (the `book` subcommand is optional):
 
 ```bash
 uv run local-tts book.pdf --list
+uv run local-tts book.pdf --metadata
 uv run local-tts book.pdf --chapter 3
 uv run local-tts book.pdf --chapters 3-5 --profile max
 uv run local-tts book.pdf --pages 120-160 --format m4b
 uv run local-tts book.pdf --pages 120-160 --resume
 uv run local-tts book.pdf --config config/study-reader.toml --chapter 3
+uv run local-tts book.pdf --config config/natural-explanatory-reader.toml --chapter 3
+uv run local-tts book.pdf --pages 120-160 --summarize
 uv run local-tts benchmark --profile balanced
 ```
 
@@ -81,8 +90,8 @@ uv run local-tts benchmark --profile balanced --runs 3
 - [x] MLX Kokoro backend; ffmpeg output to m4a, m4b, or mp3
 - [x] append-only PCM checkpoints and verified `--resume`
 - [x] benchmark sweep with generated-audio-seconds / wall-clock-second, peak RSS, and MLX telemetry
+- [x] layout-aware code, schema, and table detection; embedded PDF metadata in sidecars and audio tags
 - [ ] compare MLX with official Kokoro PyTorch/MPS and a practical CoreML port
-- [ ] richer PDF layout detection for code blocks/tables and embedded-book metadata
 
 ## Notes on output and reliability
 
@@ -95,4 +104,7 @@ reparse for every independently rendered chapter.
 
 See [technical reading and narration policy](docs/reading-policy.md) for
 `skip`/`explain`/`read` handling of code, schemas, and tables plus the supplied
-smooth-reader configuration.
+smooth-reader configuration. See [PDF layout and metadata](docs/pdf-layout.md)
+for the detection and tagging behaviour.
+See [local concluded summaries](docs/summaries.md) for the optional 4-bit MLX
+summary model, context limits, and output artifacts.

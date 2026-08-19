@@ -2,7 +2,15 @@ from pathlib import Path
 
 from pypdf import PdfWriter
 
-from local_tts.pdf import Chapter, PDFDocument, _chapters_from_starts, _unique_outline_starts, chapter_pages, page_range
+from local_tts.pdf import (
+    Chapter,
+    PDFDocument,
+    _chapters_from_starts,
+    _classify_layout_lines,
+    _unique_outline_starts,
+    chapter_pages,
+    page_range,
+)
 
 
 def test_page_range_is_one_based_and_inclusive() -> None:
@@ -25,10 +33,67 @@ def test_pdf_document_reuses_its_reader_for_inspection_and_extraction(tmp_path: 
         page_count, _ = document.inspect()
         assert page_count == 1
         assert document.reader is reader
-        assert document.extract_pages([1]) == [(1, "")]
+        assert document.extract_pages([1])[0].text == ""
 
 
 def test_duplicate_outline_destinations_do_not_create_inverted_chapters() -> None:
     starts = _unique_outline_starts([("Front matter", 7), ("Acknowledgments", 7), ("Chapter one", 12)])
     chapters = _chapters_from_starts(starts, 20)
     assert chapters == [Chapter(1, "Front matter", 7, 11), Chapter(2, "Chapter one", 12, 20)]
+
+
+def test_layout_classifier_marks_code_and_table_runs() -> None:
+    layout = "def normalize(value):\n    return value.strip()\nchar* memory; // process memory\nstruct file *files[4];\nfield | type\nid | integer\n"
+    detected = _classify_layout_lines(layout)
+    assert detected["def normalize(value):"] == "code"
+    assert detected["return value.strip()"] == "code"
+    assert detected["char* memory; // process memory"] == "code"
+    assert detected["struct file *files[4];"] == "code"
+    assert detected["field | type"] == "table"
+    assert detected["id | integer"] == "table"
+
+
+def test_layout_classifier_ignores_contents_leaders_and_keeps_schema_run() -> None:
+    layout = """\
+Chapter one . . . . . . . . . . . . . . . . . . . . . . . . 12
+Chapter two . . . . . . . . . . . . . . . . . . . . . . . . . 21
+CREATE TABLE users (
+    id integer PRIMARY KEY,
+    email text
+);
+"""
+
+    detected = _classify_layout_lines(layout)
+
+    assert "Chapter one . . . . . . . . . . . . . . . . . . . . . . 12" not in detected
+    assert detected["CREATE TABLE users ("] == "schema"
+    assert detected["id integer PRIMARY KEY,"] == "schema"
+    assert detected["email text"] == "schema"
+
+
+def test_layout_classifier_retains_aligned_table_headings() -> None:
+    layout = """\
+Pass(A)                           Pass(B)                     Who Runs?
+(stride=100)                      (stride=200)
+0                                 0                           A
+100                               0                           B
+100                               200                         C
+"""
+
+    detected = _classify_layout_lines(layout)
+
+    assert detected["Pass(A) Pass(B) Who Runs?"] == "table"
+    assert detected["(stride=100) (stride=200)"] == "table"
+    assert detected["0 0 A"] == "table"
+
+
+def test_metadata_uses_filename_when_embedded_title_is_missing(tmp_path: Path) -> None:
+    path = tmp_path / "study-book.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with path.open("wb") as handle:
+        writer.write(handle)
+    with PDFDocument(path) as document:
+        metadata = document.metadata()
+    assert metadata["title"] == "study-book"
+    assert metadata["page_count"] == 1
