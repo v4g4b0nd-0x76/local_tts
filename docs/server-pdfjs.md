@@ -30,6 +30,12 @@ is requested, a second indeterminate “Preparing local speech” bar appears; i
 changes to a chunk counter once synthesis begins, then to “Reading” while
 queued local audio plays.
 
+The packaged reader uses the Kuro Nezumi theme: soot-black browser chrome,
+warm paper-colored document text, and signal red only for active controls,
+progress, and spoken-text highlighting. PDF.js pages are rendered locally in a
+desaturated dark-paper treatment; this intentionally also mutes the colors in
+figures and photographs so the whole reading surface stays consistent.
+
 The server loads one Kokoro instance and serializes synthesis. This is
 intentional: competing Apple-GPU requests reduce throughput and can cause
 unpredictable unified-memory pressure. The supplied TOML controls its voice,

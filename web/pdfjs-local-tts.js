@@ -253,7 +253,7 @@
       if (global.document.getElementById("local-tts-pdfjs-style")) return;
       const style = global.document.createElement("style");
       style.id = "local-tts-pdfjs-style";
-      style.textContent = `.textLayer .${ACTIVE_CLASS} { background: rgba(255, 212, 59, .58) !important; border-radius: 2px; } .local-tts-status { margin-left: 8px; font-size: 12px; } .local-tts-progress { width: 96px; margin: 0 4px; vertical-align: middle; }`;
+      style.textContent = `.textLayer .${ACTIVE_CLASS} { background: rgba(183, 53, 53, .48) !important; box-shadow: 0 0 0 1px rgba(217, 74, 74, .55); border-radius: 2px; } .local-tts-status { margin-left: 8px; font-size: 12px; } .local-tts-progress { width: 96px; margin: 0 4px; vertical-align: middle; }`;
       global.document.head.append(style);
     }
 

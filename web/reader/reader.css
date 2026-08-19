@@ -1,64 +1,184 @@
+/* Kuro Nezumi — soot-black chrome, worn-paper PDF pages, signal-red focus. */
 :root {
   color-scheme: dark;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --kuro-ink: #080808;
+  --kuro-ink-alt: #101010;
+  --kuro-surface: #171717;
+  --kuro-raised: #202020;
+  --kuro-border: #343434;
+  --kuro-paper: #d7d2c8;
+  --kuro-soft: #9a948a;
+  --kuro-muted: #6f6a63;
+  --kuro-red: #b73535;
+  --kuro-red-bright: #d94a4a;
+  --kuro-selection: #2a1818;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
+
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
   overflow: hidden;
-  background: #202124;
+  color: var(--kuro-paper);
+  background: var(--kuro-ink);
+  letter-spacing: 0.01em;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, #fff 3px 4px);
+  mix-blend-mode: soft-light;
 }
 
 #toolbar {
-  min-height: 44px;
+  position: relative;
+  z-index: 30;
+  min-height: 50px;
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 0 12px;
-  background: #303134;
-  border-bottom: 1px solid #505155;
-  color: #f1f3f4;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--kuro-surface);
+  border-bottom: 1px solid var(--kuro-border);
+  box-shadow: 0 5px 15px #0008;
+}
+
+#documentName {
+  color: var(--kuro-paper);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 #toolbar button,
 #toolbar input {
-  border: 1px solid #606369;
-  border-radius: 4px;
-  background: #44464b;
-  color: inherit;
+  min-height: 30px;
+  border: 1px solid var(--kuro-border);
+  border-radius: 0;
+  background: var(--kuro-raised);
+  color: var(--kuro-paper);
+  font: inherit;
+  font-size: 12px;
   padding: 5px 8px;
 }
 
-#toolbar button:hover { background: #5a5d63; }
-#toolbar input { width: 52px; padding: 4px; }
-.divider { height: 22px; border-left: 1px solid #5d6066; margin: 0 3px; }
+#toolbar button { cursor: pointer; }
+
+#toolbar button:hover {
+  border-color: var(--kuro-red);
+  background: var(--kuro-selection);
+}
+
+#toolbar button:active {
+  background: var(--kuro-red);
+  border-color: var(--kuro-red);
+}
+
+#toolbar button:focus-visible,
+#toolbar input:focus-visible {
+  outline: 1px solid var(--kuro-red-bright);
+  outline-offset: 2px;
+}
+
+#toolbar input {
+  width: 54px;
+  padding: 4px 6px;
+  text-align: center;
+}
+
+#toolbar input::-webkit-inner-spin-button,
+#toolbar input::-webkit-outer-spin-button { opacity: 0.45; }
+
+.divider {
+  height: 22px;
+  border-left: 1px solid var(--kuro-border);
+  margin: 0 3px;
+}
+
 #localTtsControls { display: inline-flex; gap: 5px; }
-#localTtsStatus { font-size: 12px; min-width: 0; }
-#localTtsProgress { width: 100px; }
+
+#localTtsStatus {
+  min-width: 0;
+  color: var(--kuro-soft);
+  font-size: 11px;
+}
+
+progress {
+  appearance: none;
+  height: 6px;
+  border: 0;
+  background: var(--kuro-ink-alt);
+}
+
+progress::-webkit-progress-bar { background: var(--kuro-ink-alt); }
+progress::-webkit-progress-value { background: var(--kuro-red); }
+progress::-moz-progress-bar { background: var(--kuro-red); }
+
+#localTtsProgress { width: 104px; }
 
 #pdfLoading {
   position: fixed;
-  z-index: 10;
-  top: 54px;
+  z-index: 40;
+  top: 62px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  gap: 8px;
+  gap: 9px;
   align-items: center;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: #414349;
-  color: #f1f3f4;
-  box-shadow: 0 2px 8px #0008;
+  padding: 9px 12px;
+  border: 1px solid var(--kuro-border);
+  border-top-color: var(--kuro-red);
+  border-radius: 0;
+  background: var(--kuro-surface);
+  color: var(--kuro-paper);
+  box-shadow: 7px 7px 0 #000;
+  font-size: 12px;
 }
 
 #pdfLoading[hidden] { display: none; }
+#pdfLoadingProgress { width: 110px; }
 
 #viewerContainer {
   position: absolute;
-  top: 45px;
+  top: 51px;
   left: 0;
   right: 0;
   bottom: 0;
   overflow: auto;
+  background:
+    radial-gradient(circle at 50% 0, #261414 0, transparent 34%),
+    var(--kuro-ink);
+}
+
+#viewerContainer .pdfViewer { padding: 24px 0 48px; }
+
+/* PDF.js paints pages as canvases. Inverting a desaturated canvas produces the
+ * same dark paper / warm type relationship used by the Kuro Nezumi readers. */
+#viewerContainer .pdfViewer .page {
+  margin: 0 auto 24px;
+  border: 1px solid var(--kuro-border);
+  background: var(--kuro-ink);
+  box-shadow: 8px 9px 0 #000a, 0 0 0 1px #000;
+}
+
+#viewerContainer .pdfViewer .page canvas {
+  filter: grayscale(1) invert(1) sepia(0.08) saturate(0.65) brightness(0.87) contrast(0.98);
+}
+
+#viewerContainer .textLayer ::selection {
+  color: var(--kuro-paper);
+  background: var(--kuro-selection);
+}
+
+@media (max-width: 800px) {
+  #toolbar { gap: 5px; padding: 6px 8px; overflow-x: auto; }
+  #documentName { display: none; }
+  .divider { margin: 0 1px; }
+  #localTtsStatus { display: none; }
 }

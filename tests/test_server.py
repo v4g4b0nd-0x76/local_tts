@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 
 import anyio
 import httpx
@@ -140,3 +141,14 @@ def test_reader_serves_only_the_selected_pdf_and_local_assets_and_opens_browser(
     assert "a%20book.pdf" in address
     assert str(tmp_path) not in address
     assert backend.closed is True
+
+
+def test_packaged_reader_uses_the_kuro_nezumi_theme() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    stylesheet = (project_root / "web" / "reader" / "reader.css").read_text()
+    bridge = (project_root / "web" / "pdfjs-local-tts.js").read_text()
+
+    for color in ("#080808", "#d7d2c8", "#b73535", "#d94a4a", "#2a1818"):
+        assert color in stylesheet
+    assert "filter: grayscale(1) invert(1)" in stylesheet
+    assert "rgba(183, 53, 53, .48)" in bridge
