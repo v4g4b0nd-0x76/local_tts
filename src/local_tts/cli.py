@@ -1,0 +1,233 @@
+"""Command-line interface for PDF selection, rendering, and benchmarking."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+from .backends import KokoroMLXBackend
+from .benchmark import benchmark_candidates
+from .config import config_value, load_config
+from .models import CleanupOptions, PROFILES, ProfileName, RenderOptions, ResourceSettings
+from .pdf import PDFDocument, chapter_pages, page_range
+from .render import render
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="local-tts", description="Fully local PDF-to-speech study tool")
+    subparsers = parser.add_subparsers(dest="command")
+    bench = subparsers.add_parser("benchmark", help="measure local TTS throughput")
+    _add_resources(bench)
+    bench.add_argument("--runs", type=int, default=2, help="measured passes per chunk-size candidate")
+    book = subparsers.add_parser("book", help="render a PDF")
+    _add_book_args(book)
+    return parser
+
+
+def _add_resources(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profile", choices=[item.value for item in ProfileName])
+    parser.add_argument("--cpu-threads", type=int)
+    parser.add_argument("--batch-size", type=int, help="backend batch size (Kokoro MLX v1 uses 1)")
+    parser.add_argument("--prefetch", type=int)
+    parser.add_argument("--chunk-chars", type=int)
+    parser.add_argument("--memory-gb", type=int)
+
+
+def _add_book_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("pdf", type=Path)
+    parser.add_argument("--config", type=Path, help="TOML reading-policy and narration configuration")
+    select = parser.add_mutually_exclusive_group()
+    select.add_argument("--chapter", metavar="N")
+    select.add_argument("--chapters", metavar="N-M")
+    select.add_argument("--pages", metavar="N-M")
+    parser.add_argument("--list", action="store_true", help="list page count and extracted outline")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--format", choices=["m4a", "m4b", "mp3"])
+    parser.add_argument("--voice")
+    parser.add_argument("--speed", type=float)
+    parser.add_argument("--sample-rate", type=int, choices=[24000, 48000])
+    parser.add_argument("--code", choices=["skip", "read", "explain"])
+    parser.add_argument("--schemas", choices=["skip", "read", "explain"])
+    parser.add_argument("--tables", choices=["skip", "read", "explain"])
+    parser.add_argument("--urls", choices=["skip", "read"])
+    parser.add_argument("--citations", choices=["skip", "read"])
+    parser.add_argument("--footnotes", choices=["skip", "read"])
+    parser.add_argument("--keep-headers-footers", action="store_true", default=None)
+    _add_resources(parser)
+
+
+def _resources(args: argparse.Namespace) -> ResourceSettings:
+    profile = ProfileName(args.profile or ProfileName.BALANCED)
+    base = PROFILES.get(profile, PROFILES[ProfileName.BALANCED])
+    values = {
+        "cpu_threads": args.cpu_threads or base.cpu_threads,
+        "batch_size": args.batch_size or base.batch_size,
+        "prefetch": args.prefetch or base.prefetch,
+        "chunk_chars": args.chunk_chars or base.chunk_chars,
+        "memory_gb": args.memory_gb or base.memory_gb,
+    }
+    if min(values.values()) < 1:
+        raise ValueError("resource values must be positive")
+    return ResourceSettings(**values)
+
+
+def _apply_book_config(args: argparse.Namespace) -> None:
+    """Apply TOML values only when the corresponding CLI switch was omitted."""
+    config = load_config(args.config)
+
+    def assign(attr: str, section: str, key: str, fallback):
+        if getattr(args, attr) is None:
+            setattr(args, attr, config_value(config, section, key, fallback))
+
+    assign("profile", "resources", "profile", "balanced")
+    for name in ("cpu_threads", "batch_size", "prefetch", "chunk_chars", "memory_gb"):
+        assign(name, "resources", name, None)
+    assign("voice", "reader", "voice", "af_heart")
+    assign("speed", "reader", "speed", 1.0)
+    assign("sample_rate", "reader", "sample_rate", 24000)
+    assign("output_dir", "output", "directory", Path("output"))
+    if isinstance(args.output_dir, str):
+        args.output_dir = Path(args.output_dir)
+    assign("format", "output", "format", "m4a")
+    for name in ("code", "schemas", "tables", "urls", "citations", "footnotes"):
+        defaults = {"code": "skip", "schemas": "skip", "tables": "skip", "urls": "skip", "citations": "skip", "footnotes": "skip"}
+        assign(name, "cleanup", name, defaults[name])
+    if args.keep_headers_footers is None:
+        args.keep_headers_footers = not bool(config_value(config, "cleanup", "headers_footers", True))
+    if args.speed <= 0:
+        raise ValueError("reader speed must be greater than zero")
+    if args.sample_rate not in {24000, 48000}:
+        raise ValueError("reader sample_rate must be 24000 or 48000")
+
+
+def _apply_thread_limits(resources: ResourceSettings) -> None:
+    # These influence CPU-side phonemization/BLAS when those libraries honour them.
+    for key in ("OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[key] = str(resources.cpu_threads)
+    # Prevent tokenizers from creating an unbounded second worker pool beside
+    # the controlled extraction/cleanup workers.
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _print_inspection(path: Path) -> None:
+    with PDFDocument(path) as document:
+        _print_document_inspection(document)
+
+
+def _print_document_inspection(document: PDFDocument) -> None:
+    page_count, chapters = document.inspect()
+    print(f"pages: {page_count}")
+    if not chapters:
+        print("outline: none (use --pages START-END)")
+        return
+    print("outline:")
+    for chapter in chapters:
+        print(f"  {chapter.number:>3}  pp. {chapter.start_page}-{chapter.end_page}  {chapter.title}")
+
+
+def _run_book(args: argparse.Namespace) -> int:
+    if not args.pdf.is_file():
+        raise ValueError(f"PDF not found: {args.pdf}")
+    _apply_book_config(args)
+    resources = _resources(args)
+    _apply_thread_limits(resources)
+    cleanup = CleanupOptions(
+        code=args.code, schemas=args.schemas, tables=args.tables, urls=args.urls, citations=args.citations,
+        footnotes=args.footnotes, headers_footers=not args.keep_headers_footers,
+    )
+    options = RenderOptions(
+        voice=args.voice, speed=args.speed, sample_rate=args.sample_rate,
+        audio_format=args.format, resume=args.resume,
+    )
+    backend = KokoroMLXBackend()
+    backend.configure(resources)
+    with PDFDocument(args.pdf) as document:
+        if args.list:
+            _print_document_inspection(document)
+            return 0
+        page_count, chapters = document.inspect()
+        if args.chapter:
+            pages, label = chapter_pages(chapters, args.chapter)
+            jobs = [(pages, label)]
+        elif args.chapters:
+            # A chapter range deliberately remains a set of independent outputs so
+            # one successful chapter is never held hostage by a later failure.
+            range_pages, _ = chapter_pages(chapters, args.chapters)
+            first, last = range_pages[0], range_pages[-1]
+            jobs = [
+                (list(range(chapter.start_page, chapter.end_page + 1)), f"chapter-{chapter.number:02d}")
+                for chapter in chapters
+                if first <= chapter.start_page and chapter.end_page <= last
+            ]
+        elif args.pages:
+            jobs = [(page_range(args.pages, page_count), f"pages-{args.pages}")]
+        else:
+            jobs = (
+                [(list(range(chapter.start_page, chapter.end_page + 1)), f"chapter-{chapter.number:02d}") for chapter in chapters]
+                if chapters
+                else [(list(range(1, page_count + 1)), "whole-book")]
+            )
+        try:
+            # The document stays open, so a whole book does not reparse its
+            # cross-reference table for every independently resumable chapter.
+            reports = [
+                render(document.extract_pages(pages), args.output_dir, label, backend, resources, cleanup, options)
+                for pages, label in jobs
+            ]
+        finally:
+            backend.close()
+    print(json.dumps([
+        {"output": str(report.output), "chunks_total": report.chunks_total, "chunks_synthesized": report.chunks_synthesized, "audio_seconds": round(report.audio_seconds, 2), "wall_seconds": round(report.wall_seconds, 2)}
+        for report in reports
+    ], indent=2))
+    return 0
+
+
+def _run_benchmark(args: argparse.Namespace) -> int:
+    resources = _resources(args)
+    _apply_thread_limits(resources)
+    backend = KokoroMLXBackend()
+    try:
+        backend.configure(resources)
+        reports, recommended = benchmark_candidates(backend, resources, runs=args.runs)
+    finally:
+        backend.close()
+    print(json.dumps({
+        "backend": backend.name,
+        "resources": resources.as_dict(),
+        "candidates": [report.as_dict() for report in reports],
+        "recommendation": {
+            "chunk_chars": recommended.chunk_chars,
+            "realtime_factor": recommended.realtime_factor,
+            "reason": "highest measured real-time factor within the advisory memory ceiling",
+        },
+    }, indent=2))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    # Support the requested ergonomic form: local-tts book.pdf --pages 1-2.
+    if argv is None:
+        import sys
+        argv = sys.argv[1:]
+    if argv and argv[0] not in {"book", "benchmark", "-h", "--help"}:
+        argv = ["book", *argv]
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "benchmark":
+            return _run_benchmark(args)
+        if args.command == "book":
+            return _run_book(args)
+        parser.print_help()
+        return 2
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
+        return 2
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

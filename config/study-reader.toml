@@ -1,0 +1,38 @@
+# Copy and edit this file for a consistent technical-book narration style:
+#   uv run local-tts book.pdf --config config/study-reader.toml --chapter 3
+#
+# Kokoro MLX has no random seed setting. Its voice files are deterministic
+# styles, so voice + speed are the controls for a less synthetic delivery.
+
+[reader]
+# British English Emma: calm, smooth technical narration. Other installed
+# options include bf_alice, bf_isabella, af_bella, af_sarah, and af_nicole.
+voice = "bf_emma"
+# Slightly below normal rate gives technical terms and transitions more space.
+speed = 1.2
+# Native Kokoro output. 48000 only upsamples and does not add model detail.
+sample_rate = 24000
+
+[cleanup]
+# All explanations are local deterministic summaries—no cloud or hidden LLM.
+# Code/schema/table values: skip, explain, read.
+code = "explain"
+schemas = "explain"
+tables = "explain"
+urls = "skip"
+citations = "skip"
+footnotes = "skip"
+headers_footers = true
+
+[resources]
+profile = "balanced"
+# Leave these commented to inherit the selected profile. Uncomment to override.
+# cpu_threads = 4
+# prefetch = 4
+# chunk_chars = 1400
+# memory_gb = 12
+
+[output]
+# m4b is convenient for chapter-based study audio; m4a and mp3 also work.
+format = "m4b"
+directory = "output"
