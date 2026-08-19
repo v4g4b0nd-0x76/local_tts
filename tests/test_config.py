@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from local_tts.cli import _apply_book_config, _parser
+from local_tts.cli import _apply_book_config, _apply_serve_config, _parser
 
 
 def test_book_config_applies_smooth_reader_and_explain_policies(tmp_path: Path) -> None:
@@ -74,3 +74,37 @@ def test_explicit_cli_reader_value_beats_config(tmp_path: Path) -> None:
 def test_misspelled_summerize_alias_is_supported() -> None:
     args = _parser().parse_args(["book", "book.pdf", "--summerize"])
     assert args.summarize is True
+
+
+def test_server_config_reuses_reader_and_resource_settings(tmp_path: Path) -> None:
+    config = tmp_path / "reader.toml"
+    config.write_text(
+        """[reader]
+voice = "af_bella"
+speed = 0.94
+sample_rate = 24000
+chunk_pause_ms = 120
+
+[resources]
+profile = "low"
+"""
+    )
+    args = _parser().parse_args(["serve", "--config", str(config), "--port", "9876"])
+    _apply_serve_config(args)
+
+    assert args.port == 9876
+    assert args.voice == "af_bella"
+    assert args.speed == 0.94
+    assert args.chunk_pause_ms == 120
+    assert args.profile == "low"
+
+
+def test_read_command_reuses_server_config_and_can_skip_browser_open(tmp_path: Path) -> None:
+    config = tmp_path / "reader.toml"
+    config.write_text("[reader]\nvoice = \"af_bella\"\n")
+    args = _parser().parse_args(["read", "book.pdf", "--config", str(config), "--no-open", "--port", "8765"])
+    _apply_serve_config(args)
+
+    assert args.pdf == Path("book.pdf")
+    assert args.no_open is True
+    assert args.voice == "af_bella"

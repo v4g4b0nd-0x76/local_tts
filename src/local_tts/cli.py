@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from .backends import KokoroMLXBackend
@@ -29,6 +31,12 @@ def _parser() -> argparse.ArgumentParser:
     bench = subparsers.add_parser("benchmark", help="measure local TTS throughput")
     _add_resources(bench)
     bench.add_argument("--runs", type=int, default=2, help="measured passes per chunk-size candidate")
+    serve = subparsers.add_parser("serve", help="run the loopback streaming TTS API for local readers")
+    _add_serve_args(serve)
+    setup_viewer = subparsers.add_parser("setup-viewer", help="install the one-time local PDF.js reader assets")
+    setup_viewer.add_argument("--force", action="store_true", help="refresh the local PDF.js installation")
+    reader = subparsers.add_parser("read", help="open one PDF in the local PDF.js reader with speech controls")
+    _add_reader_args(reader)
     book = subparsers.add_parser("book", help="render a PDF")
     _add_book_args(book)
     return parser
@@ -84,6 +92,26 @@ def _add_book_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--footnotes", choices=["skip", "read"])
     parser.add_argument("--keep-headers-footers", action="store_true", default=None)
     _add_resources(parser)
+
+
+def _add_serve_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", type=Path, help="TOML reader and resource configuration")
+    parser.add_argument("--host", default="127.0.0.1", help="bind address (loopback by default)")
+    parser.add_argument("--port", type=int, default=8765, help="local HTTP port (default: 8765)")
+    parser.add_argument("--allow-network", action="store_true", help="allow a non-loopback bind address")
+    parser.add_argument("--allow-origin", action="append", default=[], help="additional browser origin allowed by CORS")
+    parser.add_argument("--max-request-chars", type=int, default=50_000, help="maximum text characters per request")
+    parser.add_argument("--voice")
+    parser.add_argument("--speed", type=float)
+    parser.add_argument("--sample-rate", type=int, choices=[24000, 48000])
+    parser.add_argument("--chunk-pause-ms", type=int, help="silence after each streamed audio chunk")
+    _add_resources(parser)
+
+
+def _add_reader_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("pdf", type=Path)
+    parser.add_argument("--no-open", action="store_true", help="start the reader without opening a browser tab")
+    _add_serve_args(parser)
 
 
 def _resources(args: argparse.Namespace) -> ResourceSettings:
@@ -154,6 +182,36 @@ def _apply_book_config(args: argparse.Namespace) -> None:
         raise ValueError("podcast max turns must be between 2 and 24")
     if not 0 <= args.podcast_turn_pause_ms <= 4_000:
         raise ValueError("podcast turn_pause_ms must be between 0 and 4000")
+    args.pronunciations = _pronunciations(config)
+
+
+def _apply_serve_config(args: argparse.Namespace) -> None:
+    """Apply the reader parts of the TOML configuration to the local API."""
+    config = load_config(args.config)
+
+    def assign(attr: str, section: str, key: str, fallback):
+        if getattr(args, attr) is None:
+            setattr(args, attr, config_value(config, section, key, fallback))
+
+    assign("profile", "resources", "profile", "balanced")
+    for name in ("cpu_threads", "batch_size", "prefetch", "chunk_chars", "memory_gb"):
+        assign(name, "resources", name, None)
+    assign("voice", "reader", "voice", "af_heart")
+    assign("speed", "reader", "speed", 1.0)
+    assign("sample_rate", "reader", "sample_rate", 24_000)
+    assign("chunk_pause_ms", "reader", "chunk_pause_ms", 0)
+    if args.port not in range(1, 65_536):
+        raise ValueError("server port must be between 1 and 65535")
+    if args.host not in {"127.0.0.1", "::1", "localhost"} and not args.allow_network:
+        raise ValueError("non-loopback server binding needs --allow-network")
+    if args.max_request_chars < 20:
+        raise ValueError("server max_request_chars must be at least 20")
+    if args.speed <= 0:
+        raise ValueError("reader speed must be greater than zero")
+    if args.sample_rate not in {24_000, 48_000}:
+        raise ValueError("reader sample_rate must be 24000 or 48000")
+    if not 0 <= args.chunk_pause_ms <= 2_000:
+        raise ValueError("reader chunk_pause_ms must be between 0 and 2000")
     args.pronunciations = _pronunciations(config)
 
 
@@ -393,18 +451,114 @@ def _run_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_serve(args: argparse.Namespace) -> int:
+    _apply_serve_config(args)
+    resources = _resources(args)
+    _apply_thread_limits(resources)
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover - install-time concern
+        raise RuntimeError("server support is unavailable; run `uv sync --extra server`") from exc
+    from .server import ServerSettings, create_app
+
+    options = RenderOptions(
+        voice=args.voice,
+        speed=args.speed,
+        sample_rate=args.sample_rate,
+        chunk_pause_ms=args.chunk_pause_ms,
+        pronunciations=args.pronunciations,
+    )
+    app = create_app(
+        ServerSettings(
+            resources=resources,
+            render=options,
+            max_request_chars=args.max_request_chars,
+            allowed_origins=tuple(args.allow_origin),
+        )
+    )
+    uvicorn.run(app, host=args.host, port=args.port, access_log=False)
+    return 0
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _pdfjs_root() -> Path:
+    return _project_root() / "web" / "node_modules" / "pdfjs-dist"
+
+
+def _run_setup_viewer(args: argparse.Namespace) -> int:
+    web_root = _project_root() / "web"
+    if not (web_root / "package.json").is_file():
+        raise RuntimeError("local PDF.js setup metadata is missing; reinstall the project")
+    if shutil.which("npm") is None:
+        raise RuntimeError("Node.js and npm are required once for the local PDF.js viewer setup")
+    if not args.force and (_pdfjs_root() / "build" / "pdf.mjs").is_file():
+        print(f"PDF.js is already installed locally at {_pdfjs_root()}")
+        return 0
+    subprocess.run(["npm", "install", "--no-audit", "--no-fund"], cwd=web_root, check=True)
+    print(f"PDF.js is ready locally at {_pdfjs_root()}")
+    return 0
+
+
+def _run_read(args: argparse.Namespace) -> int:
+    if not args.pdf.is_file():
+        raise ValueError(f"PDF not found: {args.pdf}")
+    _apply_serve_config(args)
+    resources = _resources(args)
+    _apply_thread_limits(resources)
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover - install-time concern
+        raise RuntimeError("server support is unavailable; run `uv sync --extra server`") from exc
+    from .reader import create_reader_app, viewer_address
+    from .server import ServerSettings
+
+    options = RenderOptions(
+        voice=args.voice,
+        speed=args.speed,
+        sample_rate=args.sample_rate,
+        chunk_pause_ms=args.chunk_pause_ms,
+        pronunciations=args.pronunciations,
+    )
+    viewer_url = viewer_address(args.host, args.port, args.pdf)
+    app = create_reader_app(
+        ServerSettings(
+            resources=resources,
+            render=options,
+            max_request_chars=args.max_request_chars,
+            allowed_origins=tuple(args.allow_origin),
+        ),
+        args.pdf,
+        _pdfjs_root(),
+        _project_root() / "web" / "reader",
+        viewer_url,
+        open_browser=not args.no_open,
+    )
+    print(f"Opening local reader: {viewer_url}")
+    uvicorn.run(app, host=args.host, port=args.port, access_log=False)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     # Support the requested ergonomic form: local-tts book.pdf --pages 1-2.
     if argv is None:
         import sys
         argv = sys.argv[1:]
-    if argv and argv[0] not in {"book", "benchmark", "-h", "--help"}:
+    if argv and argv[0] not in {"book", "benchmark", "serve", "setup-viewer", "read", "-h", "--help"}:
         argv = ["book", *argv]
     args = parser.parse_args(argv)
     try:
         if args.command == "benchmark":
             return _run_benchmark(args)
+        if args.command == "serve":
+            return _run_serve(args)
+        if args.command == "setup-viewer":
+            return _run_setup_viewer(args)
+        if args.command == "read":
+            return _run_read(args)
         if args.command == "book":
             return _run_book(args)
         parser.print_help()

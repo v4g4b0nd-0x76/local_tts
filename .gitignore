@@ -4,4 +4,5 @@ __pycache__/
 *.py[cod]
 output/
 .DS_Store
-
+web/node_modules/
+npm-debug.log*

@@ -31,3 +31,10 @@ Use this guidance for work on `local-tts`.
    model phase separate from Kokoro, checkpoint each voiced turn, and record
    both voice IDs and generation metrics. Prefer the verified American pair
    `af_bella` and `am_michael` in the sample configuration.
+10. The optional browser API must remain loopback-first and serialize model
+    access. Keep streamed audio chunk metadata tied to exact, unmodified source
+    offsets so PDF.js can highlight spoken text while pronunciation rewrites
+    apply only to the synthesized copy.
+11. The `read` command must serve only its explicit PDF input and local PDF.js
+    assets after `setup-viewer`; it should open the browser by default and show
+    both document-load and requested-speech progress in the viewer.

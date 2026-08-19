@@ -47,6 +47,9 @@ uv run local-tts book.pdf --config config/study-reader.toml --chapter 3
 uv run local-tts book.pdf --config config/natural-explanatory-reader.toml --chapter 3
 uv run local-tts book.pdf --pages 120-160 --summarize
 uv run local-tts book.pdf --config config/natural-explanatory-reader.toml --pages 120-160 --podcast
+uv run local-tts setup-viewer
+uv run local-tts read book.pdf --config config/natural-explanatory-reader.toml --port 8765
+uv run local-tts serve --config config/natural-explanatory-reader.toml --port 8765
 uv run local-tts benchmark --profile balanced
 ```
 
@@ -110,3 +113,5 @@ for the detection and tagging behaviour.
 See [local concluded summaries](docs/summaries.md) for the optional 4-bit MLX
 summary model, context limits, and output artifacts. See [local two-voice
 podcasts](docs/podcasts.md) for the American-English host/explainer study mode.
+See [the local streaming server and PDF.js bridge](docs/server-pdfjs.md) to
+read selections or current PDF.js pages with synchronized highlights.

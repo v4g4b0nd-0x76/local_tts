@@ -1,0 +1,8 @@
+{
+  "name": "local-tts-pdfjs-reader",
+  "private": true,
+  "description": "One-time local PDF.js viewer dependency for local-tts",
+  "dependencies": {
+    "pdfjs-dist": ">=5.0.0 <6.0.0"
+  }
+}

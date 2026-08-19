@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>local-tts reader</title>
+    <link rel="stylesheet" href="/assets/pdfjs/web/pdf_viewer.css">
+    <link rel="stylesheet" href="/reader/reader.css">
+  </head>
+  <body>
+    <header id="toolbar">
+      <strong id="documentName">Local PDF reader</strong>
+      <span class="divider"></span>
+      <button id="previousPage" type="button" title="Previous page">Previous</button>
+      <label>Page <input id="pageNumber" type="number" min="1" value="1"></label>
+      <span id="pageCount">of —</span>
+      <button id="nextPage" type="button" title="Next page">Next</button>
+      <span class="divider"></span>
+      <span id="localTtsControls"></span>
+      <span id="localTtsStatus" aria-live="polite"></span>
+      <progress id="localTtsProgress" hidden></progress>
+    </header>
+    <section id="pdfLoading" aria-live="polite">
+      <span id="pdfLoadingLabel">Opening local PDF…</span>
+      <progress id="pdfLoadingProgress"></progress>
+    </section>
+    <div id="viewerContainer" tabindex="0">
+      <div id="viewer" class="pdfViewer"></div>
+    </div>
+    <script src="/local-tts/pdfjs-local-tts.js"></script>
+    <script type="module" src="/reader/reader.mjs"></script>
+  </body>
+</html>

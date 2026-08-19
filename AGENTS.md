@@ -41,6 +41,13 @@ Hugging Face cache or a user-supplied model directory.
   retain per-turn voice identity in the resume hash, and persist a transcript
   plus model-cost sidecar. The supplied American-English pair is `af_bella`
   (host) and `am_michael` (explainer).
+- The optional local HTTP service binds to loopback by default, holds one
+  serial Kokoro inference stream, and bounds request size. Its PDF.js bridge
+  uses stream chunk source offsets for highlighting; preserve exact source
+  offsets even when applying pronunciation rewrites only to spoken text.
+- `setup-viewer` installs PDF.js once under `web/node_modules`; `read PDF`
+  serves only that selected PDF plus local assets and opens the component
+  viewer. Keep PDF load and requested-speech progress visible in the UI.
 - Reader pronunciation fixes are explicit configuration mappings applied just
   before synthesis. They must be part of the resume hash and have tests.
 - Use ffmpeg only for final audio encoding. Keep a single append-only signed
