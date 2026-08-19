@@ -26,3 +26,8 @@ Use this guidance for work on `local-tts`.
    primary evidence, cap all chapter context, and persist provenance and cost
    metrics. Unload the LLM before Kokoro synthesis and test planning without
    downloading model weights.
+9. Two-voice study podcasts reuse that bounded context but must validate a
+   strict alternating `host`/`explainer` script before narration. Keep the
+   model phase separate from Kokoro, checkpoint each voiced turn, and record
+   both voice IDs and generation metrics. Prefer the verified American pair
+   `af_bella` and `am_michael` in the sample configuration.

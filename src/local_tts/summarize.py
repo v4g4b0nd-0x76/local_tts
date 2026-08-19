@@ -28,6 +28,14 @@ class SummaryOptions:
 
 
 @dataclass(frozen=True)
+class PodcastOptions:
+    """Controls for a short, source-grounded two-speaker study conversation."""
+
+    max_output_tokens: int = 640
+    max_turns: int = 8
+
+
+@dataclass(frozen=True)
 class SummarySource:
     role: str
     title: str
@@ -80,6 +88,29 @@ class SummaryResult:
         return values
 
 
+@dataclass(frozen=True)
+class PodcastTurn:
+    """One intentionally short turn in the generated study conversation."""
+
+    speaker: str
+    text: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"speaker": self.speaker, "text": self.text}
+
+
+@dataclass(frozen=True)
+class PodcastResult:
+    turns: tuple[PodcastTurn, ...]
+    generation: SummaryResult
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "turns": [turn.as_dict() for turn in self.turns],
+            "generation": self.generation.as_dict(),
+        }
+
+
 class MLXSummaryBackend:
     """A lazy, local-only-after-setup MLX-LM summarization adapter."""
 
@@ -101,6 +132,19 @@ class MLXSummaryBackend:
         mx.set_cache_limit(self._memory_limit_bytes)
 
     def summarize(self, context: SummaryContext) -> SummaryResult:
+        return self._generate(context.prompt, self.options.max_output_tokens)
+
+    def podcast(self, context: SummaryContext, options: PodcastOptions) -> PodcastResult:
+        """Generate a strict, simple-language dialogue from the same evidence.
+
+        The local model creates the script only. Kokoro then voices each turn in
+        a separate phase, keeping unified-memory pressure bounded.
+        """
+        _validate_podcast_options(options)
+        generation = self._generate(_podcast_prompt(context.sources, context.selected_pages, options), options.max_output_tokens)
+        return PodcastResult(_parse_podcast_turns(generation.text, options.max_turns), generation)
+
+    def _generate(self, user_prompt: str, max_tokens: int) -> SummaryResult:
         model, tokenizer = self._load()
         import mlx.core as mx
 
@@ -112,7 +156,7 @@ class MLXSummaryBackend:
                     "Do not invent facts, citations, or chapter links."
                 ),
             },
-            {"role": "user", "content": context.prompt},
+            {"role": "user", "content": user_prompt},
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         input_tokens = len(tokenizer.encode(prompt))
@@ -129,7 +173,7 @@ class MLXSummaryBackend:
                 model,
                 tokenizer,
                 prompt=prompt,
-                max_tokens=self.options.max_output_tokens,
+                max_tokens=max_tokens,
                 sampler=make_sampler(temp=0.0),
                 verbose=False,
             )
@@ -256,6 +300,46 @@ def write_summary(output_dir: Path, label: str, context: SummaryContext, result:
     return markdown_path, json_path
 
 
+def write_podcast(
+    output_dir: Path,
+    label: str,
+    context: SummaryContext,
+    result: PodcastResult,
+    *,
+    host_voice: str,
+    explainer_voice: str,
+) -> tuple[Path, Path]:
+    """Persist a readable transcript and exact local-generation provenance."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = output_dir / f"{label}-podcast.md"
+    json_path = output_dir / f"{label}-podcast.json"
+    scope = ", ".join(str(page) for page in context.selected_pages)
+    transcript = "\n\n".join(
+        f"**{'Host' if turn.speaker == 'host' else 'Explainer'}:** {turn.text}" for turn in result.turns
+    )
+    markdown = (
+        f"# Study podcast: {label}\n\n"
+        f"Selected PDF pages: {scope}\n\n"
+        f"Voices: host `{host_voice}`; explainer `{explainer_voice}`\n\n"
+        "## Transcript\n\n"
+        f"{transcript}\n"
+    )
+    _atomic_write(markdown_path, markdown)
+    _atomic_write(
+        json_path,
+        json.dumps(
+            {
+                "context": context.as_dict(),
+                "voices": {"host": host_voice, "explainer": explainer_voice},
+                "podcast": result.as_dict(),
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+    )
+    return markdown_path, json_path
+
+
 def _clean_pages(pages: list[ExtractedPage], cleanup: CleanupOptions) -> str:
     return "\n\n".join(
         clean_page(page.text, cleanup, layout_kinds=page.technical_lines) for page in pages
@@ -321,6 +405,78 @@ def _prompt(sources: tuple[SummarySource, ...], selected_pages: tuple[int, ...])
     )
 
 
+def _podcast_prompt(
+    sources: tuple[SummarySource, ...], selected_pages: tuple[int, ...], options: PodcastOptions
+) -> str:
+    sections = "\n\n".join(
+        f"[{source.role.upper()}: {source.title}; PDF pages {min(source.pages)}-{max(source.pages)}]\n{source.excerpt}"
+        for source in sources
+        if source.excerpt
+    )
+    return (
+        f"Create a short two-person study podcast about selected PDF pages {min(selected_pages)}-{max(selected_pages)}. "
+        "Use only the supplied PDF excerpts. The selected-pages excerpt is the evidence; previous and referenced excerpts "
+        "are context only, and may be used only for an explicit connection. Make the topic easier for a new learner: "
+        "define the central idea in plain language, use one grounded analogy or example if helpful, explain cause and effect, "
+        "and end with a practical takeaway. Do not invent facts, citations, or chapter links.\n\n"
+        f"Return only a valid JSON array with exactly {options.max_turns} objects. Each object must have exactly `speaker` and `text`. "
+        "The first speaker is `host`, then speakers strictly alternate `host`, `explainer`, `host`, `explainer`. "
+        "The host asks concise learner-focused questions; the explainer answers warmly and simply. Keep every turn to one or two "
+        "short sentences. Do not use Markdown, headings, stage directions, greetings, repeated introductions, an outro, or mention "
+        "being an AI, this prompt, the PDF, or the source excerpts.\n\n"
+        f"{sections}"
+    )
+
+
+def _parse_podcast_turns(text: str, maximum: int) -> tuple[PodcastTurn, ...]:
+    """Decode the one supported dialogue shape without guessing at prose."""
+    candidate = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", candidate, re.IGNORECASE | re.DOTALL)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    decoder = json.JSONDecoder()
+    decoded: object | None = None
+    for offset, character in enumerate(candidate):
+        if character != "[":
+            continue
+        try:
+            decoded, _ = decoder.raw_decode(candidate[offset:])
+            break
+        except json.JSONDecodeError:
+            continue
+    if not isinstance(decoded, list):
+        raise RuntimeError("the local podcast model did not return a JSON turn list; try again or lower --podcast-max-turns")
+    if len(decoded) < 2:
+        raise RuntimeError(f"the local podcast model returned {len(decoded)} turns; expected at least 2")
+    # Smaller local instruction models can occasionally keep talking after the
+    # requested complete exchange count. Retain only complete host/explainer
+    # pairs, never a dangling final host question, so the public turn cap is
+    # still honored without accepting malformed speaker order.
+    if len(decoded) > maximum:
+        limit = maximum if maximum % 2 == 0 else maximum - 1
+        decoded = decoded[:limit]
+    turns: list[PodcastTurn] = []
+    for index, item in enumerate(decoded):
+        if not isinstance(item, dict) or set(item) != {"speaker", "text"}:
+            raise RuntimeError("each local podcast turn must contain only speaker and text")
+        expected = "host" if index % 2 == 0 else "explainer"
+        speaker = item.get("speaker")
+        text = item.get("text")
+        if speaker != expected:
+            raise RuntimeError(f"podcast turn {index + 1} must use speaker {expected!r}")
+        if not isinstance(text, str) or not (spoken := " ".join(text.split())):
+            raise RuntimeError(f"podcast turn {index + 1} has no readable text")
+        turns.append(PodcastTurn(speaker, spoken))
+    return tuple(turns)
+    return (
+        f"Write a conclusive, listener-friendly study summary of the selected PDF pages {min(selected_pages)}-{max(selected_pages)}. "
+        "The selected-pages excerpt is the evidence to summarize. Previous and referenced chapter excerpts are context only: "
+        "use them solely to explain a connection when it is explicit. Explain the central idea, causal mechanism, key terms, "
+        "and practical takeaway. Keep it to 4-7 short paragraphs, use plain prose suitable for text-to-speech, and do not repeat yourself.\n\n"
+        f"{sections}"
+    )
+
+
 def _chapter_dict(chapter: Chapter) -> dict[str, object]:
     return {"number": chapter.number, "title": chapter.title, "start_page": chapter.start_page, "end_page": chapter.end_page}
 
@@ -338,3 +494,10 @@ def _validate_options(options: SummaryOptions) -> None:
         raise ValueError("summary max output tokens must be between 64 and 4096")
     if not 0 <= options.max_reference_chapters <= 8:
         raise ValueError("summary references must be between 0 and 8")
+
+
+def _validate_podcast_options(options: PodcastOptions) -> None:
+    if not 64 <= options.max_output_tokens <= 4_096:
+        raise ValueError("podcast max output tokens must be between 64 and 4096")
+    if not 2 <= options.max_turns <= 24:
+        raise ValueError("podcast max turns must be between 2 and 24")

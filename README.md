@@ -46,6 +46,7 @@ uv run local-tts book.pdf --pages 120-160 --resume
 uv run local-tts book.pdf --config config/study-reader.toml --chapter 3
 uv run local-tts book.pdf --config config/natural-explanatory-reader.toml --chapter 3
 uv run local-tts book.pdf --pages 120-160 --summarize
+uv run local-tts book.pdf --config config/natural-explanatory-reader.toml --pages 120-160 --podcast
 uv run local-tts benchmark --profile balanced
 ```
 
@@ -107,4 +108,5 @@ See [technical reading and narration policy](docs/reading-policy.md) for
 smooth-reader configuration. See [PDF layout and metadata](docs/pdf-layout.md)
 for the detection and tagging behaviour.
 See [local concluded summaries](docs/summaries.md) for the optional 4-bit MLX
-summary model, context limits, and output artifacts.
+summary model, context limits, and output artifacts. See [local two-voice
+podcasts](docs/podcasts.md) for the American-English host/explainer study mode.

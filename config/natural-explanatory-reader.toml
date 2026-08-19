@@ -24,6 +24,15 @@ context_chars = 32000
 max_output_tokens = 480
 max_references = 3
 
+[podcast]
+# A verified American-English pair from the installed Kokoro MLX model.
+# Host asks learner-focused questions; explainer gives the plain-language answer.
+host_voice = "af_bella"
+explainer_voice = "am_michael"
+max_output_tokens = 640
+max_turns = 8
+turn_pause_ms = 350
+
 [cleanup]
 code = "explain"
 schemas = "explain"

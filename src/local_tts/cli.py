@@ -12,8 +12,15 @@ from .benchmark import benchmark_candidates
 from .config import config_value, load_config
 from .models import CleanupOptions, PROFILES, ProfileName, RenderOptions, ResourceSettings
 from .pdf import PDFDocument, chapter_pages, page_range
-from .render import render
-from .summarize import MLXSummaryBackend, SummaryOptions, build_summary_context, write_summary
+from .render import ScriptLine, render, render_script
+from .summarize import (
+    MLXSummaryBackend,
+    PodcastOptions,
+    SummaryOptions,
+    build_summary_context,
+    write_podcast,
+    write_summary,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,10 +56,19 @@ def _add_book_args(parser: argparse.ArgumentParser) -> None:
         "--summarize", "--summerize", dest="summarize", action="store_true",
         help="write and narrate a local conclusion using selected pages plus bounded chapter context",
     )
-    parser.add_argument("--summary-model", help="local MLX model for --summarize")
+    parser.add_argument(
+        "--podcast", action="store_true",
+        help="write and narrate a local two-voice, simple-language study conversation",
+    )
+    parser.add_argument("--summary-model", help="local MLX model for --summarize and --podcast")
     parser.add_argument("--summary-context-chars", type=int, help="maximum source characters sent to the local summary model")
     parser.add_argument("--summary-max-tokens", type=int, help="maximum tokens in the concluded summary")
     parser.add_argument("--summary-references", type=int, help="number of explicitly referenced chapters to include (0-8)")
+    parser.add_argument("--podcast-host-voice", help="Kokoro host voice (sample American voice: af_bella)")
+    parser.add_argument("--podcast-explainer-voice", help="Kokoro explainer voice (sample American voice: am_michael)")
+    parser.add_argument("--podcast-max-tokens", type=int, help="maximum tokens in the generated dialogue script")
+    parser.add_argument("--podcast-max-turns", type=int, help="maximum alternating host/explainer turns (2-24)")
+    parser.add_argument("--podcast-turn-pause-ms", type=int, help="silence after each host/explainer turn")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--format", choices=["m4a", "m4b", "mp3"])
@@ -104,6 +120,11 @@ def _apply_book_config(args: argparse.Namespace) -> None:
     assign("summary_context_chars", "summary", "context_chars", 32_000)
     assign("summary_max_tokens", "summary", "max_output_tokens", 480)
     assign("summary_references", "summary", "max_references", 3)
+    assign("podcast_host_voice", "podcast", "host_voice", "af_bella")
+    assign("podcast_explainer_voice", "podcast", "explainer_voice", "am_michael")
+    assign("podcast_max_tokens", "podcast", "max_output_tokens", 640)
+    assign("podcast_max_turns", "podcast", "max_turns", 8)
+    assign("podcast_turn_pause_ms", "podcast", "turn_pause_ms", 350)
     assign("output_dir", "output", "directory", Path("output"))
     if isinstance(args.output_dir, str):
         args.output_dir = Path(args.output_dir)
@@ -125,6 +146,14 @@ def _apply_book_config(args: argparse.Namespace) -> None:
         raise ValueError("summary max output tokens must be between 64 and 4096")
     if not 0 <= args.summary_references <= 8:
         raise ValueError("summary references must be between 0 and 8")
+    if not args.podcast_host_voice.strip() or not args.podcast_explainer_voice.strip():
+        raise ValueError("podcast voices must be non-empty")
+    if not 64 <= args.podcast_max_tokens <= 4_096:
+        raise ValueError("podcast max output tokens must be between 64 and 4096")
+    if not 2 <= args.podcast_max_turns <= 24:
+        raise ValueError("podcast max turns must be between 2 and 24")
+    if not 0 <= args.podcast_turn_pause_ms <= 4_000:
+        raise ValueError("podcast turn_pause_ms must be between 0 and 4000")
     args.pronunciations = _pronunciations(config)
 
 
@@ -190,6 +219,10 @@ def _run_book(args: argparse.Namespace) -> int:
         max_output_tokens=args.summary_max_tokens,
         max_reference_chapters=args.summary_references,
     )
+    podcast_options = PodcastOptions(
+        max_output_tokens=args.podcast_max_tokens,
+        max_turns=args.podcast_max_turns,
+    )
     with PDFDocument(args.pdf) as document:
         page_count, chapters = document.inspect()
         book_metadata = document.metadata()
@@ -218,15 +251,28 @@ def _run_book(args: argparse.Namespace) -> int:
         # weights and lets summary generation and rendering share extraction.
         job_pages = [(pages, label, document.extract_pages(pages)) for pages, label in jobs]
         summaries = {}
-        if args.summarize:
+        podcasts = {}
+        if args.summarize or args.podcast:
             summary_backend = MLXSummaryBackend(summary_options)
             summary_backend.configure(resources)
             try:
                 for pages, label, extracted in job_pages:
                     context = build_summary_context(document, extracted, chapters, cleanup, summary_options)
-                    result = summary_backend.summarize(context)
-                    markdown, details = write_summary(args.output_dir, label, context, result)
-                    summaries[label] = (result, markdown, details)
+                    if args.summarize:
+                        result = summary_backend.summarize(context)
+                        markdown, details = write_summary(args.output_dir, label, context, result)
+                        summaries[label] = (result, markdown, details)
+                    if args.podcast:
+                        result = summary_backend.podcast(context, podcast_options)
+                        markdown, details = write_podcast(
+                            args.output_dir,
+                            label,
+                            context,
+                            result,
+                            host_voice=args.podcast_host_voice,
+                            explainer_voice=args.podcast_explainer_voice,
+                        )
+                        podcasts[label] = (result, markdown, details)
             finally:
                 # The LLM and Kokoro intentionally never stay loaded together.
                 summary_backend.close()
@@ -249,7 +295,27 @@ def _run_book(args: argparse.Namespace) -> int:
                         [(0, f"Conclusion. {result.text}")], args.output_dir, f"{label}-summary", backend,
                         resources, summary_cleanup, options, book_metadata,
                     )
-                reports.append((narration, summary_audio, summaries.get(label)))
+                podcast_audio = None
+                if label in podcasts:
+                    result, _, _ = podcasts[label]
+                    podcast_audio = render_script(
+                        [
+                            ScriptLine(
+                                index + 1,
+                                turn.text,
+                                args.podcast_host_voice if turn.speaker == "host" else args.podcast_explainer_voice,
+                            )
+                            for index, turn in enumerate(result.turns)
+                        ],
+                        args.output_dir,
+                        f"{label}-podcast",
+                        backend,
+                        resources,
+                        options,
+                        book_metadata,
+                        turn_pause_ms=args.podcast_turn_pause_ms,
+                    )
+                reports.append((narration, summary_audio, summaries.get(label), podcast_audio, podcasts.get(label)))
         finally:
             backend.close()
     print(json.dumps([
@@ -278,8 +344,29 @@ def _run_book(args: argparse.Namespace) -> int:
                 if summary_files and summary_audio
                 else {}
             ),
+            **(
+                {
+                    "podcast": {
+                        "transcript": str(podcast_files[1]),
+                        "details": str(podcast_files[2]),
+                        "audio": str(podcast_audio.output),
+                        "turns": len(podcast_files[0].turns),
+                        "chunks_total": podcast_audio.chunks_total,
+                        "chunks_synthesized": podcast_audio.chunks_synthesized,
+                        "audio_seconds": round(podcast_audio.audio_seconds, 2),
+                        "tts_wall_seconds": round(podcast_audio.wall_seconds, 2),
+                        "input_tokens": podcast_files[0].generation.input_tokens,
+                        "output_tokens": podcast_files[0].generation.output_tokens,
+                        "wall_seconds": round(podcast_files[0].generation.wall_seconds, 2),
+                        "mlx_active_mb": round(podcast_files[0].generation.mlx_active_mb, 1),
+                        "mlx_peak_mb": round(podcast_files[0].generation.mlx_peak_mb, 1),
+                    }
+                }
+                if podcast_files and podcast_audio
+                else {}
+            ),
         }
-        for report, summary_audio, summary_files in reports
+        for report, summary_audio, summary_files, podcast_audio, podcast_files in reports
     ], indent=2))
     return 0
 

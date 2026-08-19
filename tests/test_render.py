@@ -7,7 +7,7 @@ import numpy as np
 
 from local_tts.backends.base import TTSResult
 from local_tts.models import CleanupOptions, RenderOptions, ResourceSettings
-from local_tts.render import render
+from local_tts.render import ScriptLine, render, render_script
 
 
 class FakeBackend:
@@ -16,10 +16,12 @@ class FakeBackend:
     def __init__(self) -> None:
         self.calls = 0
         self.texts: list[str] = []
+        self.voices: list[str] = []
 
     def synthesize(self, text: str, *, voice: str, speed: float, sample_rate: int) -> TTSResult:
         self.calls += 1
         self.texts.append(text)
+        self.voices.append(voice)
         return TTSResult(np.zeros(240, dtype=np.float32), sample_rate)
 
     def close(self) -> None:
@@ -100,3 +102,43 @@ def test_render_applies_pronunciation_rewrites_before_synthesis(tmp_path: Path) 
         RenderOptions(audio_format="mp3", pronunciations=(("prob lem", "problum"),)),
     )
     assert backend.texts == ["A problum can be solved."]
+
+
+def test_podcast_script_alternates_voices_and_resumes(tmp_path: Path) -> None:
+    backend = FakeBackend()
+    settings = ResourceSettings(cpu_threads=1, prefetch=1, chunk_chars=100, memory_gb=1)
+    lines = [
+        ScriptLine(1, "What is the main idea?", "af_bella"),
+        ScriptLine(2, "It connects cause and effect in simple language.", "am_michael"),
+    ]
+    report = render_script(
+        lines,
+        tmp_path,
+        "page-01-podcast",
+        backend,
+        settings,
+        RenderOptions(audio_format="mp3"),
+        turn_pause_ms=250,
+    )
+
+    assert report.output.exists()
+    assert backend.voices == ["af_bella", "am_michael"]
+    manifest = json.loads((tmp_path / ".page-01-podcast.local-tts" / "manifest.json").read_text())
+    assert manifest["script"] == {
+        "kind": "podcast",
+        "turns": 2,
+        "voices": ["af_bella", "am_michael"],
+        "turn_pause_ms": 250,
+    }
+    initial_calls = backend.calls
+    resumed = render_script(
+        lines,
+        tmp_path,
+        "page-01-podcast",
+        backend,
+        settings,
+        RenderOptions(audio_format="mp3", resume=True),
+        turn_pause_ms=250,
+    )
+    assert resumed.chunks_synthesized == 0
+    assert backend.calls == initial_calls

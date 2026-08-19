@@ -36,6 +36,11 @@ Hugging Face cache or a user-supplied model directory.
   context bounded, include only the previous outline chapter plus explicit
   `Chapter N` references, record the exact context in a sidecar, and unload
   the LLM before loading Kokoro so unified-memory footprints never overlap.
+- Optional two-voice podcasts use the same source-bound context and a strict
+  alternating script. Keep the dialogue model phase separate from Kokoro,
+  retain per-turn voice identity in the resume hash, and persist a transcript
+  plus model-cost sidecar. The supplied American-English pair is `af_bella`
+  (host) and `am_michael` (explainer).
 - Reader pronunciation fixes are explicit configuration mappings applied just
   before synthesis. They must be part of the resume hash and have tests.
 - Use ffmpeg only for final audio encoding. Keep a single append-only signed

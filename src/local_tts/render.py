@@ -10,7 +10,7 @@ import subprocess
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -34,6 +34,15 @@ class RenderReport:
     detected_code_lines: int
     detected_schema_lines: int
     detected_table_lines: int
+
+
+@dataclass(frozen=True)
+class ScriptLine:
+    """A pre-written line with a per-line voice, used for study podcasts."""
+
+    number: int
+    text: str
+    voice: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,7 @@ class _CheckpointStore:
         options: RenderOptions,
         book_metadata: dict[str, object] | None,
         layout_summary: dict[str, int],
+        script: dict[str, object] | None = None,
     ) -> None:
         manifest = {
             "version": _STATE_VERSION,
@@ -87,6 +97,8 @@ class _CheckpointStore:
             "book_metadata": book_metadata or {},
             "layout_summary": layout_summary,
         }
+        if script:
+            manifest["script"] = script
         _atomic_json(self.manifest_path, manifest)
 
     def append_audio(self, audio: np.ndarray) -> int:
@@ -235,6 +247,106 @@ def render(
         output, chunks_total, synthesized, total_audio, elapsed,
         layout_summary["code_lines"], layout_summary["schema_lines"], layout_summary["table_lines"],
     )
+
+
+def render_script(
+    lines: list[ScriptLine],
+    output_dir: Path,
+    label: str,
+    backend: TTSBackend,
+    resources: ResourceSettings,
+    options: RenderOptions,
+    book_metadata: dict[str, object] | None = None,
+    *,
+    turn_pause_ms: int = 350,
+) -> RenderReport:
+    """Render a bounded multi-voice script into one resumable audio artifact.
+
+    The script is already generated prose, so it deliberately bypasses PDF
+    cleanup. Its checkpoint hash includes the active speaker's voice and the
+    inter-turn pause, preventing accidental mixed-voice resumes.
+    """
+    if not lines:
+        raise ValueError("podcast script has no turns")
+    if not 0 <= turn_pause_ms <= 4_000:
+        raise ValueError("podcast turn_pause_ms must be between 0 and 4000")
+    if any(not line.text.strip() or not line.voice.strip() for line in lines):
+        raise ValueError("podcast turns need non-empty text and voices")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    job_dir = output_dir / f".{label}.local-tts"
+    store = _CheckpointStore(job_dir, options.resume)
+    layout_summary = {"layout_aware_pages": 0, "code_lines": 0, "schema_lines": 0, "table_lines": 0}
+    if not options.resume:
+        store.write_manifest(
+            resources,
+            CleanupOptions(),
+            options,
+            book_metadata,
+            layout_summary,
+            {
+                "kind": "podcast",
+                "turns": len(lines),
+                "voices": sorted({line.voice for line in lines}),
+                "turn_pause_ms": turn_pause_ms,
+            },
+        )
+    started = time.perf_counter()
+    synthesized = 0
+    total_audio = 0.0
+    chunks_total = 0
+
+    for line in lines:
+        parts = list(chunk_text(line.text, resources.chunk_chars))
+        if not parts:
+            continue
+        for part_index, text in enumerate(parts):
+            chunks_total += 1
+            pause_ms = turn_pause_ms if part_index == len(parts) - 1 else options.chunk_pause_ms
+            line_options = replace(options, voice=line.voice, chunk_pause_ms=pause_ms)
+            spoken_text = apply_pronunciations(text, line_options.pronunciations)
+            text_hash = _text_hash(line.number, spoken_text, line_options)
+            checkpoint = store.records.get(chunks_total)
+            if options.resume and checkpoint is not None:
+                _verify_checkpoint(chunks_total, checkpoint, line.number, text_hash)
+                total_audio += checkpoint.duration_seconds
+                continue
+
+            result = backend.synthesize(
+                spoken_text,
+                voice=line.voice,
+                speed=options.speed,
+                sample_rate=options.sample_rate,
+            )
+            audio = _with_pause(result.audio, result.sample_rate, pause_ms)
+            duration = len(audio) / result.sample_rate
+            end_bytes = store.append_audio(audio) if audio.size else _pcm_size(store.pcm_path)
+            store.append_checkpoint(
+                chunks_total,
+                _Checkpoint(line.number, text_hash, duration, end_bytes, empty=result.audio.size == 0),
+            )
+            total_audio += duration
+            synthesized += 1
+
+    if not chunks_total:
+        raise ValueError("podcast script has no readable turns")
+    if options.resume and len(store.records) > chunks_total:
+        raise ValueError("resume checkpoint has more chunks than the podcast script; rerun without --resume")
+
+    output = output_dir / f"{label}.{options.audio_format}"
+    if not (options.resume and store.completed and output.exists() and synthesized == 0):
+        _encode(
+            store.pcm_path,
+            output,
+            options.audio_format,
+            options.sample_rate,
+            resources.cpu_threads,
+            book_metadata,
+            label,
+        )
+        store.mark_complete(output)
+    elapsed = time.perf_counter() - started
+    return RenderReport(output, chunks_total, synthesized, total_audio, elapsed, 0, 0, 0)
 
 
 def _cleaned_pages(

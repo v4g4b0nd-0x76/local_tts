@@ -17,6 +17,13 @@ context_chars = 9000
 max_output_tokens = 320
 max_references = 2
 
+[podcast]
+host_voice = "af_bella"
+explainer_voice = "am_michael"
+max_output_tokens = 400
+max_turns = 6
+turn_pause_ms = 450
+
 [pronunciation]
 "prob lem" = "problum"
 
@@ -47,6 +54,11 @@ directory = "spoken"
     assert args.summary_context_chars == 9000
     assert args.summary_max_tokens == 320
     assert args.summary_references == 2
+    assert args.podcast_host_voice == "af_bella"
+    assert args.podcast_explainer_voice == "am_michael"
+    assert args.podcast_max_tokens == 400
+    assert args.podcast_max_turns == 6
+    assert args.podcast_turn_pause_ms == 450
     assert args.pronunciations == (("prob lem", "problum"),)
 
 
