@@ -109,6 +109,8 @@ def test_reader_serves_only_the_selected_pdf_and_local_assets_and_opens_browser(
     reader.mkdir()
     (reader / "index.html").write_text("<title>reader</title>")
     (tmp_path / "pdfjs-local-tts.js").write_text("bridge")
+    custom_css = tmp_path / "custom.css"
+    custom_css.write_text("body { background: rebeccapurple; }")
     opened: list[tuple[str, int]] = []
     monkeypatch.setattr("local_tts.reader.webbrowser.open", lambda url, new: opened.append((url, new)))
     backend = FakeBackend()
@@ -121,9 +123,10 @@ def test_reader_serves_only_the_selected_pdf_and_local_assets_and_opens_browser(
         address,
         open_browser=True,
         backend=backend,  # type: ignore[arg-type]
+        custom_css=custom_css,
     )
 
-    async def get_assets() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+    async def get_assets() -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
         async with app.router.lifespan_context(app):  # type: ignore[attr-defined]
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -132,11 +135,13 @@ def test_reader_serves_only_the_selected_pdf_and_local_assets_and_opens_browser(
                     await client.get("/assets/pdfjs/build/pdf.mjs"),
                     await client.get("/local-tts/pdfjs-local-tts.js"),
                     await client.get("/file"),
+                    await client.get("/reader/custom-theme.css"),
                 )
 
-    page, asset, bridge, file_response = anyio.run(get_assets)
-    assert page.status_code == asset.status_code == bridge.status_code == file_response.status_code == 200
+    page, asset, bridge, file_response, custom_response = anyio.run(get_assets)
+    assert page.status_code == asset.status_code == bridge.status_code == file_response.status_code == custom_response.status_code == 200
     assert file_response.content == b"%PDF-local-test"
+    assert custom_response.text == "body { background: rebeccapurple; }"
     assert opened == [(address, 2)]
     assert "a%20book.pdf" in address
     assert str(tmp_path) not in address
@@ -147,8 +152,13 @@ def test_packaged_reader_uses_the_kuro_nezumi_theme() -> None:
     project_root = Path(__file__).resolve().parents[1]
     stylesheet = (project_root / "web" / "reader" / "reader.css").read_text()
     bridge = (project_root / "web" / "pdfjs-local-tts.js").read_text()
+    module = (project_root / "web" / "reader" / "reader.mjs").read_text()
+    markup = (project_root / "web" / "reader" / "index.html").read_text()
 
     for color in ("#080808", "#d7d2c8", "#b73535", "#d94a4a", "#2a1818"):
         assert color in stylesheet
-    assert "filter: grayscale(1) invert(1)" in stylesheet
-    assert "rgba(183, 53, 53, .48)" in bridge
+    assert "--kuro-document-filter: grayscale(1) invert(1)" in stylesheet
+    assert "--local-tts-highlight" in bridge
+    assert "maxCanvasPixels: 2 ** 27" in module
+    assert "enableDetailCanvas: true" in module
+    assert 'id="zoomSelect"' in markup

@@ -1,0 +1,22 @@
+/* Copy this file, then start the reader with:
+ * local-tts read book.pdf --theme custom --theme-css /absolute/path/to/theme.css
+ *
+ * The custom mode begins with the standard PDF.js appearance. Override these
+ * variables or any reader selector to make it your own. */
+:root[data-reader-theme="custom"] {
+  --kuro-ink: #111827;
+  --kuro-ink-alt: #ffffff;
+  --kuro-surface: #f8fafc;
+  --kuro-raised: #ffffff;
+  --kuro-border: #cbd5e1;
+  --kuro-paper: #0f172a;
+  --kuro-soft: #475569;
+  --kuro-muted: #64748b;
+  --kuro-red: #0f766e;
+  --kuro-red-bright: #115e59;
+  --kuro-selection: #ccfbf1;
+  --kuro-reader-glow: #dbeafe;
+  --kuro-document-filter: none;
+  --local-tts-highlight: rgba(20, 184, 166, 0.38);
+  --local-tts-highlight-outline: rgba(13, 148, 136, 0.72);
+}

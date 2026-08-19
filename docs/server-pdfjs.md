@@ -30,11 +30,45 @@ is requested, a second indeterminate “Preparing local speech” bar appears; i
 changes to a chunk counter once synthesis begins, then to “Reading” while
 queued local audio plays.
 
-The packaged reader uses the Kuro Nezumi theme: soot-black browser chrome,
+The packaged reader uses the Kuro Nezumi theme by default: soot-black browser chrome,
 warm paper-colored document text, and signal red only for active controls,
 progress, and spoken-text highlighting. PDF.js pages are rendered locally in a
 desaturated dark-paper treatment; this intentionally also mutes the colors in
 figures and photographs so the whole reading surface stays consistent.
+
+## Zoom quality and appearance
+
+The reader provides 50–600% zoom plus page-width and page-fit controls. It
+allows PDF.js to draw up to 128 million pixels per visible page (four times its
+normal desktop ceiling) and keeps PDF.js's high-detail partial renderer on.
+This makes vector text and diagrams stay sharp at high zoom without allowing an
+unbounded canvas allocation. A scanned or otherwise low-resolution PDF image
+cannot gain detail that was not present in the source.
+
+Use the standard light PDF.js appearance instead of Kuro Nezumi:
+
+```bash
+uv run local-tts read ~/Books/book.pdf --theme default
+```
+
+For a local custom stylesheet, start from
+[the example](../config/pdf-reader-custom.css.example):
+
+```bash
+cp config/pdf-reader-custom.css.example ~/Documents/my-pdf-reader.css
+uv run local-tts read ~/Books/book.pdf --theme custom \
+  --theme-css ~/Documents/my-pdf-reader.css
+```
+
+The custom stylesheet is exposed only to the loopback reader as
+`/reader/custom-theme.css`; the URL never reveals its filesystem path. You can
+also put the setting in a reader TOML file:
+
+```toml
+[viewer]
+theme = "custom"
+custom_css = "/Users/you/Documents/my-pdf-reader.css"
+```
 
 The server loads one Kokoro instance and serializes synthesis. This is
 intentional: competing Apple-GPU requests reduce throughput and can cause

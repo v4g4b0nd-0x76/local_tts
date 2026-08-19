@@ -23,6 +23,7 @@ def create_reader_app(
     *,
     open_browser: bool,
     backend: TTSBackend | None = None,
+    custom_css: Path | None = None,
 ) -> FastAPI:
     """Serve only the chosen PDF, local PDF.js assets, and the loopback TTS API."""
     source = pdf_path.resolve()
@@ -34,30 +35,49 @@ def create_reader_app(
     bridge = reader_root.parent / "pdfjs-local-tts.js"
     if not bridge.is_file():
         raise ValueError("local PDF.js speech bridge is missing; reinstall the project")
+    if custom_css is not None:
+        custom_css = custom_css.resolve()
+        if not custom_css.is_file():
+            raise ValueError(f"custom theme CSS not found: {custom_css}")
 
     app = create_app(
         settings,
         backend,
         startup_callback=(lambda: webbrowser.open(viewer_url, new=2)) if open_browser else None,
     )
-    app.mount("/assets/pdfjs", StaticFiles(directory=pdfjs_root), name="pdfjs-assets")
-    app.mount("/reader", StaticFiles(directory=reader_root, html=True), name="reader-assets")
-
     @app.get("/local-tts/pdfjs-local-tts.js", include_in_schema=False)
     async def speech_bridge() -> FileResponse:
         return FileResponse(bridge, media_type="text/javascript")
+
+    if custom_css is not None:
+        @app.get("/reader/custom-theme.css", include_in_schema=False)
+        async def custom_theme() -> FileResponse:
+            return FileResponse(custom_css, media_type="text/css")
 
     @app.get("/file", include_in_schema=False)
     async def selected_file() -> FileResponse:
         return FileResponse(source, media_type="application/pdf", filename=source.name)
 
+    # Routes are registered before the static reader mount so the optional
+    # custom stylesheet cannot be swallowed by StaticFiles as a 404.
+    app.mount("/assets/pdfjs", StaticFiles(directory=pdfjs_root), name="pdfjs-assets")
+    app.mount("/reader", StaticFiles(directory=reader_root, html=True), name="reader-assets")
+
     return app
 
 
-def viewer_address(host: str, port: int, pdf_path: Path) -> str:
+def viewer_address(
+    host: str,
+    port: int,
+    pdf_path: Path,
+    *,
+    theme: str = "kuro-nezumi",
+    custom_theme: bool = False,
+) -> str:
     """Construct a loopback URL without disclosing the source filesystem path."""
     display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return f"http://{display_host}:{port}/reader/?file=/file&name={quote(pdf_path.name)}"
+    custom = "&custom_theme=1" if custom_theme else ""
+    return f"http://{display_host}:{port}/reader/?file=/file&name={quote(pdf_path.name)}&theme={quote(theme)}{custom}"
 
 
 def _require_pdfjs_assets(pdfjs_root: Path) -> None:

@@ -47,7 +47,10 @@ Hugging Face cache or a user-supplied model directory.
   offsets even when applying pronunciation rewrites only to spoken text.
 - `setup-viewer` installs PDF.js once under `web/node_modules`; `read PDF`
   serves only that selected PDF plus local assets and opens the component
-  viewer. Keep PDF load and requested-speech progress visible in the UI.
+  viewer. Keep PDF load and requested-speech progress visible in the UI. The
+  reader keeps its high-detail canvas rendering enabled and supports the Kuro
+  Nezumi, standard, and explicitly supplied custom-CSS themes without exposing
+  a custom stylesheet's filesystem path to the browser.
 - Reader pronunciation fixes are explicit configuration mappings applied just
   before synthesis. They must be part of the resume hash and have tests.
 - Use ffmpeg only for final audio encoding. Keep a single append-only signed

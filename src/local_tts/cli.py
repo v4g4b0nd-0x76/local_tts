@@ -112,6 +112,12 @@ def _add_reader_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("pdf", type=Path)
     parser.add_argument("--no-open", action="store_true", help="start the reader without opening a browser tab")
     _add_serve_args(parser)
+    parser.add_argument(
+        "--theme",
+        choices=["kuro-nezumi", "default", "custom"],
+        help="reader appearance: Kuro Nezumi, the standard PDF.js appearance, or --theme-css",
+    )
+    parser.add_argument("--theme-css", type=Path, help="local CSS file used with --theme custom")
 
 
 def _resources(args: argparse.Namespace) -> ResourceSettings:
@@ -213,6 +219,29 @@ def _apply_serve_config(args: argparse.Namespace) -> None:
     if not 0 <= args.chunk_pause_ms <= 2_000:
         raise ValueError("reader chunk_pause_ms must be between 0 and 2000")
     args.pronunciations = _pronunciations(config)
+
+
+def _apply_reader_config(args: argparse.Namespace) -> None:
+    """Apply viewer-only settings after the shared local server configuration."""
+    config = load_config(args.config)
+    if args.theme is None:
+        args.theme = config_value(config, "viewer", "theme", "kuro-nezumi")
+    if args.theme_css is None and args.theme == "custom":
+        configured_css = config_value(config, "viewer", "custom_css", None)
+        if configured_css is not None:
+            if not isinstance(configured_css, str) or not configured_css.strip():
+                raise ValueError("viewer custom_css must be a non-empty path")
+            args.theme_css = Path(configured_css)
+            if args.config is not None and not args.theme_css.is_absolute():
+                args.theme_css = args.config.parent / args.theme_css
+    if args.theme not in {"kuro-nezumi", "default", "custom"}:
+        raise ValueError("viewer theme must be kuro-nezumi, default, or custom")
+    if args.theme == "custom" and args.theme_css is None:
+        raise ValueError("--theme custom needs --theme-css PATH or [viewer] custom_css")
+    if args.theme_css is not None and args.theme != "custom":
+        raise ValueError("--theme-css is only used with --theme custom")
+    if args.theme_css is not None and not args.theme_css.is_file():
+        raise ValueError(f"custom theme CSS not found: {args.theme_css}")
 
 
 def _pronunciations(config: dict[str, dict[str, object]]) -> tuple[tuple[str, str], ...]:
@@ -506,6 +535,7 @@ def _run_read(args: argparse.Namespace) -> int:
     if not args.pdf.is_file():
         raise ValueError(f"PDF not found: {args.pdf}")
     _apply_serve_config(args)
+    _apply_reader_config(args)
     resources = _resources(args)
     _apply_thread_limits(resources)
     try:
@@ -522,7 +552,13 @@ def _run_read(args: argparse.Namespace) -> int:
         chunk_pause_ms=args.chunk_pause_ms,
         pronunciations=args.pronunciations,
     )
-    viewer_url = viewer_address(args.host, args.port, args.pdf)
+    viewer_url = viewer_address(
+        args.host,
+        args.port,
+        args.pdf,
+        theme=args.theme,
+        custom_theme=args.theme_css is not None,
+    )
     app = create_reader_app(
         ServerSettings(
             resources=resources,
@@ -535,6 +571,7 @@ def _run_read(args: argparse.Namespace) -> int:
         _project_root() / "web" / "reader",
         viewer_url,
         open_browser=not args.no_open,
+        custom_css=args.theme_css,
     )
     print(f"Opening local reader: {viewer_url}")
     uvicorn.run(app, host=args.host, port=args.port, access_log=False)

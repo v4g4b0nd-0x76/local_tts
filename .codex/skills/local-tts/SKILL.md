@@ -37,4 +37,6 @@ Use this guidance for work on `local-tts`.
     apply only to the synthesized copy.
 11. The `read` command must serve only its explicit PDF input and local PDF.js
     assets after `setup-viewer`; it should open the browser by default and show
-    both document-load and requested-speech progress in the viewer.
+    both document-load and requested-speech progress in the viewer. Preserve
+    the bounded high-detail canvas renderer and serve any opted-in custom theme
+    CSS only through the loopback reader, never as a source filesystem URL.

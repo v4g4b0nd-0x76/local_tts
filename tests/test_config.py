@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from local_tts.cli import _apply_book_config, _apply_serve_config, _parser
+import pytest
+
+from local_tts.cli import _apply_book_config, _apply_reader_config, _apply_serve_config, _parser
 
 
 def test_book_config_applies_smooth_reader_and_explain_policies(tmp_path: Path) -> None:
@@ -108,3 +110,36 @@ def test_read_command_reuses_server_config_and_can_skip_browser_open(tmp_path: P
     assert args.pdf == Path("book.pdf")
     assert args.no_open is True
     assert args.voice == "af_bella"
+
+
+def test_read_command_loads_a_custom_viewer_stylesheet_from_config(tmp_path: Path) -> None:
+    stylesheet = tmp_path / "reader.css"
+    stylesheet.write_text("body { background: navy; }")
+    config = tmp_path / "reader.toml"
+    config.write_text(
+        """[viewer]
+theme = "custom"
+custom_css = "reader.css"
+"""
+    )
+    args = _parser().parse_args(["read", "book.pdf", "--config", str(config), "--no-open"])
+    _apply_serve_config(args)
+    _apply_reader_config(args)
+
+    assert args.theme == "custom"
+    assert args.theme_css == stylesheet
+
+    default_args = _parser().parse_args(
+        ["read", "book.pdf", "--config", str(config), "--theme", "default", "--no-open"]
+    )
+    _apply_serve_config(default_args)
+    _apply_reader_config(default_args)
+    assert default_args.theme == "default"
+    assert default_args.theme_css is None
+
+
+def test_custom_viewer_theme_requires_a_stylesheet() -> None:
+    args = _parser().parse_args(["read", "book.pdf", "--theme", "custom", "--no-open"])
+    _apply_serve_config(args)
+    with pytest.raises(ValueError, match="--theme custom needs --theme-css"):
+        _apply_reader_config(args)
